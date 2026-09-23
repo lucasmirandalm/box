@@ -4,8 +4,6 @@ import {
   Brush,
   Eraser,
   LogOut,
-  Minus,
-  Plus,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -23,6 +21,11 @@ type RoomEditorProps = {
 
 type Tool = "brush" | "eraser";
 
+type Point = {
+  x: number;
+  y: number;
+};
+
 const MIN_ZOOM = 25;
 const MAX_ZOOM = 300;
 const ZOOM_STEP = 10;
@@ -36,20 +39,41 @@ export default function RoomEditor({
   const workspaceRef = useRef<HTMLDivElement>(null);
 
   const isDrawingRef = useRef(false);
-  const lastPointRef = useRef<{ x: number; y: number } | null>(
-    null,
-  );
+  const isPanningRef = useRef(false);
+
+  const lastDrawingPointRef = useRef<Point | null>(null);
+  const lastPanPointRef = useRef<Point | null>(null);
+
+  const zoomRef = useRef(100);
+  const panRef = useRef<Point>({
+    x: 0,
+    y: 0,
+  });
 
   const [tool, setTool] = useState<Tool>("brush");
+
   const [brushSize, setBrushSize] = useState(8);
   const [eraserSize, setEraserSize] = useState(30);
+
   const [color, setColor] = useState("#111111");
+
   const [zoom, setZoom] = useState(100);
 
-  const userInitial = userName.charAt(0).toUpperCase();
+  const [pan, setPan] = useState<Point>({
+    x: 0,
+    y: 0,
+  });
+
+  const [isPanning, setIsPanning] = useState(false);
+
+  const userInitial = userName
+    .charAt(0)
+    .toUpperCase();
 
   const currentSize =
-    tool === "brush" ? brushSize : eraserSize;
+    tool === "brush"
+      ? brushSize
+      : eraserSize;
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -61,24 +85,80 @@ export default function RoomEditor({
     function handleWheel(event: WheelEvent) {
       event.preventDefault();
 
-      setZoom((currentZoom) => {
-        if (event.deltaY < 0) {
-          return Math.min(
-            currentZoom + ZOOM_STEP,
-            MAX_ZOOM,
-          );
-        }
+      const workspace = workspaceRef.current;
 
-        return Math.max(
-          currentZoom - ZOOM_STEP,
-          MIN_ZOOM,
-        );
-      });
+      if (!workspace) {
+        return;
+      }
+
+      const rect =
+        workspace.getBoundingClientRect();
+
+      const mouseX =
+        event.clientX -
+        (rect.left + rect.width / 2);
+
+      const mouseY =
+        event.clientY -
+        (rect.top + rect.height / 2);
+
+      const currentZoom = zoomRef.current;
+
+      const nextZoom =
+        event.deltaY < 0
+          ? Math.min(
+              currentZoom + ZOOM_STEP,
+              MAX_ZOOM,
+            )
+          : Math.max(
+              currentZoom - ZOOM_STEP,
+              MIN_ZOOM,
+            );
+
+      if (nextZoom === currentZoom) {
+        return;
+      }
+
+      const currentScale =
+        currentZoom / 100;
+
+      const nextScale =
+        nextZoom / 100;
+
+      const currentPan =
+        panRef.current;
+
+      const pointX =
+        (mouseX - currentPan.x) /
+        currentScale;
+
+      const pointY =
+        (mouseY - currentPan.y) /
+        currentScale;
+
+      const nextPan = {
+        x:
+          mouseX -
+          pointX * nextScale,
+        y:
+          mouseY -
+          pointY * nextScale,
+      };
+
+      zoomRef.current = nextZoom;
+      panRef.current = nextPan;
+
+      setZoom(nextZoom);
+      setPan(nextPan);
     }
 
-    workspace.addEventListener("wheel", handleWheel, {
-      passive: false,
-    });
+    workspace.addEventListener(
+      "wheel",
+      handleWheel,
+      {
+        passive: false,
+      },
+    );
 
     return () => {
       workspace.removeEventListener(
@@ -97,12 +177,14 @@ export default function RoomEditor({
       return null;
     }
 
-    const rect = canvas.getBoundingClientRect();
+    const rect =
+      canvas.getBoundingClientRect();
 
     return {
       x:
         (event.clientX - rect.left) *
         (canvas.width / rect.width),
+
       y:
         (event.clientY - rect.top) *
         (canvas.height / rect.height),
@@ -116,41 +198,55 @@ export default function RoomEditor({
     context.lineJoin = "round";
 
     if (tool === "brush") {
-      context.globalCompositeOperation = "source-over";
+      context.globalCompositeOperation =
+        "source-over";
+
       context.strokeStyle = color;
       context.fillStyle = color;
       context.lineWidth = brushSize;
-    } else {
-      context.globalCompositeOperation = "destination-out";
-      context.lineWidth = eraserSize;
+
+      return;
     }
+
+    context.globalCompositeOperation =
+      "destination-out";
+
+    context.strokeStyle = "#000000";
+    context.fillStyle = "#000000";
+    context.lineWidth = eraserSize;
   }
 
   function drawPoint(
     context: CanvasRenderingContext2D,
-    x: number,
-    y: number,
+    point: Point,
   ) {
     configureContext(context);
 
-    const radius =
+    const size =
       tool === "brush"
-        ? brushSize / 2
-        : eraserSize / 2;
+        ? brushSize
+        : eraserSize;
 
     context.beginPath();
-    context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fill();
 
-    if (tool === "eraser") {
-      context.fillStyle = "rgba(0, 0, 0, 1)";
-      context.fill();
-    }
+    context.arc(
+      point.x,
+      point.y,
+      size / 2,
+      0,
+      Math.PI * 2,
+    );
+
+    context.fill();
   }
 
-  function handlePointerDown(
+  function handleCanvasPointerDown(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    if (event.button !== 0) {
+      return;
+    }
+
     const canvas = canvasRef.current;
     const point = getCanvasPoint(event);
 
@@ -158,21 +254,26 @@ export default function RoomEditor({
       return;
     }
 
-    const context = canvas.getContext("2d");
+    const context =
+      canvas.getContext("2d");
 
     if (!context) {
       return;
     }
 
-    canvas.setPointerCapture(event.pointerId);
+    canvas.setPointerCapture(
+      event.pointerId,
+    );
 
     isDrawingRef.current = true;
-    lastPointRef.current = point;
 
-    drawPoint(context, point.x, point.y);
+    lastDrawingPointRef.current =
+      point;
+
+    drawPoint(context, point);
   }
 
-  function handlePointerMove(
+  function handleCanvasPointerMove(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
     if (!isDrawingRef.current) {
@@ -180,14 +281,23 @@ export default function RoomEditor({
     }
 
     const canvas = canvasRef.current;
-    const point = getCanvasPoint(event);
-    const lastPoint = lastPointRef.current;
 
-    if (!canvas || !point || !lastPoint) {
+    const currentPoint =
+      getCanvasPoint(event);
+
+    const lastPoint =
+      lastDrawingPointRef.current;
+
+    if (
+      !canvas ||
+      !currentPoint ||
+      !lastPoint
+    ) {
       return;
     }
 
-    const context = canvas.getContext("2d");
+    const context =
+      canvas.getContext("2d");
 
     if (!context) {
       return;
@@ -196,27 +306,128 @@ export default function RoomEditor({
     configureContext(context);
 
     context.beginPath();
-    context.moveTo(lastPoint.x, lastPoint.y);
-    context.lineTo(point.x, point.y);
+
+    context.moveTo(
+      lastPoint.x,
+      lastPoint.y,
+    );
+
+    context.lineTo(
+      currentPoint.x,
+      currentPoint.y,
+    );
+
     context.stroke();
 
-    lastPointRef.current = point;
+    lastDrawingPointRef.current =
+      currentPoint;
   }
 
-  function handlePointerUp(
+  function handleCanvasPointerUp(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
     const canvas = canvasRef.current;
 
-    if (canvas?.hasPointerCapture(event.pointerId)) {
-      canvas.releasePointerCapture(event.pointerId);
+    if (
+      canvas?.hasPointerCapture(
+        event.pointerId,
+      )
+    ) {
+      canvas.releasePointerCapture(
+        event.pointerId,
+      );
     }
 
     isDrawingRef.current = false;
-    lastPointRef.current = null;
+    lastDrawingPointRef.current = null;
   }
 
-  function handleSizeChange(value: number) {
+  function handleWorkspacePointerDown(
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    if (event.button !== 1) {
+      return;
+    }
+
+    event.preventDefault();
+
+    isPanningRef.current = true;
+    setIsPanning(true);
+
+    lastPanPointRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+    };
+
+    event.currentTarget.setPointerCapture(
+      event.pointerId,
+    );
+  }
+
+  function handleWorkspacePointerMove(
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    if (!isPanningRef.current) {
+      return;
+    }
+
+    const lastPoint =
+      lastPanPointRef.current;
+
+    if (!lastPoint) {
+      return;
+    }
+
+    const deltaX =
+      event.clientX - lastPoint.x;
+
+    const deltaY =
+      event.clientY - lastPoint.y;
+
+    const nextPan = {
+      x: panRef.current.x + deltaX,
+      y: panRef.current.y + deltaY,
+    };
+
+    panRef.current = nextPan;
+
+    setPan(nextPan);
+
+    lastPanPointRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+    };
+  }
+
+  function handleWorkspacePointerUp(
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    if (
+      event.button !== 1 &&
+      !isPanningRef.current
+    ) {
+      return;
+    }
+
+    if (
+      event.currentTarget.hasPointerCapture(
+        event.pointerId,
+      )
+    ) {
+      event.currentTarget.releasePointerCapture(
+        event.pointerId,
+      );
+    }
+
+    isPanningRef.current = false;
+    lastPanPointRef.current = null;
+
+    setIsPanning(false);
+  }
+
+  function handleSizeChange(
+    value: number,
+  ) {
     if (tool === "brush") {
       setBrushSize(value);
       return;
@@ -229,19 +440,25 @@ export default function RoomEditor({
     <main className="flex h-screen flex-col overflow-hidden bg-[#09090d] text-white">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#0d0d12] px-4">
         <div className="flex items-center gap-5">
-          <Link href="/" className="flex items-center gap-2">
+          <Link
+            href="/"
+            className="flex items-center gap-2"
+          >
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#ff1152] font-black">
               B
             </div>
 
-            <span className="text-xl font-black">box</span>
+            <span className="text-xl font-black">
+              box
+            </span>
           </Link>
 
           <div className="hidden h-7 w-px bg-white/10 md:block" />
 
           <div className="hidden md:block">
             <p className="text-sm font-bold">
-              Sala {roomCode.toUpperCase()}
+              Sala{" "}
+              {roomCode.toUpperCase()}
             </p>
 
             <p className="text-xs font-medium text-white/30">
@@ -283,7 +500,9 @@ export default function RoomEditor({
           <button
             type="button"
             title="Pincel"
-            onClick={() => setTool("brush")}
+            onClick={() =>
+              setTool("brush")
+            }
             className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
               tool === "brush"
                 ? "bg-[#ff1152] text-white"
@@ -296,7 +515,9 @@ export default function RoomEditor({
           <button
             type="button"
             title="Borracha"
-            onClick={() => setTool("eraser")}
+            onClick={() =>
+              setTool("eraser")
+            }
             className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
               tool === "eraser"
                 ? "bg-[#ff1152] text-white"
@@ -313,7 +534,9 @@ export default function RoomEditor({
               type="color"
               value={color}
               onChange={(event) =>
-                setColor(event.target.value)
+                setColor(
+                  event.target.value,
+                )
               }
               className="h-9 w-9 cursor-pointer rounded-lg border-0 bg-transparent"
             />
@@ -328,11 +551,17 @@ export default function RoomEditor({
           <input
             type="range"
             min="1"
-            max={tool === "brush" ? 100 : 200}
+            max={
+              tool === "brush"
+                ? 100
+                : 200
+            }
             value={currentSize}
             onChange={(event) =>
               handleSizeChange(
-                Number(event.target.value),
+                Number(
+                  event.target.value,
+                ),
               )
             }
             className="w-36 accent-[#ff1152]"
@@ -343,26 +572,35 @@ export default function RoomEditor({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Minus
-            size={15}
-            className="text-white/30"
-          />
-
-          <span className="min-w-14 text-center text-xs font-bold text-white/50">
-            {zoom}%
-          </span>
-
-          <Plus
-            size={15}
-            className="text-white/30"
-          />
+        <div className="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/50">
+          {zoom}%
         </div>
       </div>
 
       <div
         ref={workspaceRef}
-        className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[#19191f]"
+        onPointerDown={
+          handleWorkspacePointerDown
+        }
+        onPointerMove={
+          handleWorkspacePointerMove
+        }
+        onPointerUp={
+          handleWorkspacePointerUp
+        }
+        onPointerCancel={
+          handleWorkspacePointerUp
+        }
+        onAuxClick={(event) => {
+          if (event.button === 1) {
+            event.preventDefault();
+          }
+        }}
+        className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[#19191f] ${
+          isPanning
+            ? "cursor-grabbing"
+            : ""
+        }`}
       >
         <div
           className="pointer-events-none absolute inset-0 opacity-20"
@@ -376,17 +614,27 @@ export default function RoomEditor({
         <div
           className="relative shrink-0 shadow-[0_20px_80px_rgba(0,0,0,0.45)]"
           style={{
-            transform: `scale(${zoom / 100})`,
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom / 100})`,
+            transformOrigin:
+              "center center",
           }}
         >
           <canvas
             ref={canvasRef}
             width={1000}
             height={700}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
+            onPointerDown={
+              handleCanvasPointerDown
+            }
+            onPointerMove={
+              handleCanvasPointerMove
+            }
+            onPointerUp={
+              handleCanvasPointerUp
+            }
+            onPointerCancel={
+              handleCanvasPointerUp
+            }
             className={`block h-[700px] w-[1000px] touch-none bg-white ${
               tool === "brush"
                 ? "cursor-crosshair"
@@ -395,8 +643,18 @@ export default function RoomEditor({
           />
         </div>
 
-        <div className="pointer-events-none absolute bottom-4 left-4 rounded-xl border border-white/[0.08] bg-[#0d0d12]/90 px-3 py-2 text-xs font-bold text-white/40">
-          Role o mouse para ajustar o zoom
+        <div className="pointer-events-none absolute bottom-4 left-4 flex items-center gap-3 rounded-xl border border-white/[0.08] bg-[#0d0d12]/90 px-4 py-2 text-xs font-bold text-white/40 backdrop-blur">
+          <span>
+            Scroll: zoom
+          </span>
+
+          <span className="text-white/15">
+            •
+          </span>
+
+          <span>
+            Botão do meio: mover
+          </span>
         </div>
       </div>
     </main>
