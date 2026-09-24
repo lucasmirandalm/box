@@ -1,8 +1,24 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import Link from "next/link";
+import {
+  ArrowLeft,
+  LogIn,
+} from "lucide-react";
 
-export default async function JoinRoomPage() {
+import { createClient } from "@/lib/supabase/server";
+import { joinRoom } from "@/lib/rooms/actions";
+
+type JoinRoomPageProps = {
+  searchParams: Promise<{
+    error?: string;
+  }>;
+};
+
+export default async function JoinRoomPage({
+  searchParams,
+}: JoinRoomPageProps) {
+  const params = await searchParams;
+
   const supabase = await createClient();
 
   const {
@@ -23,51 +39,46 @@ export default async function JoinRoomPage() {
     user.user_metadata?.picture ??
     null;
 
-  const userInitial = userName.charAt(0).toUpperCase();
+  const initial =
+    userName.charAt(0).toUpperCase();
 
   return (
-    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#09090d] px-6 text-white">
-      <div className="pointer-events-none absolute left-1/2 top-[-300px] h-[600px] w-[600px] -translate-x-1/2 rounded-full bg-[#ff1152]/10 blur-[140px]" />
+    <main className="min-h-screen bg-[#09090d] px-6 py-8 text-white">
+      <div className="mx-auto w-full max-w-xl">
+        <Link
+          href="/"
+          className="mb-10 inline-flex items-center gap-2 text-sm font-bold text-white/40 transition hover:text-white"
+        >
+          <ArrowLeft size={17} />
+          Voltar
+        </Link>
 
-      <Link
-        href="/"
-        className="absolute left-6 top-7 z-10 flex items-center gap-3 md:left-10"
-      >
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#ff1152] text-lg font-black text-white shadow-[0_0_30px_rgba(255,17,82,0.25)]">
-          B
-        </div>
+        <div className="rounded-3xl border border-white/[0.08] bg-[#0d0d12] p-8 shadow-2xl">
+          <div className="mb-8">
+            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#ff1152]/10 text-[#ff1152]">
+              <LogIn size={23} />
+            </div>
 
-        <span className="text-2xl font-extrabold tracking-tight">
-          box
-        </span>
-      </Link>
+            <h1 className="text-3xl font-black">
+              Entrar em uma sala
+            </h1>
 
-      <div className="relative z-10 w-full max-w-md">
-        <div className="mb-10 text-center">
-          <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#ff1152]/10 text-2xl font-black text-[#ff1152]">
-            #
+            <p className="mt-2 text-sm font-medium leading-6 text-white/40">
+              Digite o código enviado pelo criador
+              da sala.
+            </p>
           </div>
 
-          <h1 className="text-4xl font-black tracking-tight">
-            Entre em uma <span className="text-[#ff1152]">sala</span>
-          </h1>
-
-          <p className="mt-3 font-medium leading-6 text-white/40">
-            Digite o código da sala para começar a desenhar com seus amigos.
-          </p>
-        </div>
-
-        <div className="rounded-[28px] border border-white/[0.08] bg-white/[0.03] p-6 shadow-2xl shadow-black/30 sm:p-8">
-          <div className="mb-6 flex items-center gap-3 rounded-2xl border border-white/[0.06] bg-white/[0.03] p-3">
+          <div className="mb-7 flex items-center gap-3 rounded-2xl border border-white/[0.07] bg-white/[0.03] p-3">
             {avatarUrl ? (
               <img
                 src={avatarUrl}
                 alt={userName}
-                className="h-10 w-10 rounded-full object-cover"
+                className="h-10 w-10 rounded-xl object-cover"
               />
             ) : (
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#ff1152] text-sm font-black text-white">
-                {userInitial}
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#ff1152] text-sm font-black">
+                {initial}
               </div>
             )}
 
@@ -76,56 +87,52 @@ export default async function JoinRoomPage() {
                 Entrando como
               </p>
 
-              <p className="text-sm font-bold text-white">
+              <p className="text-sm font-bold">
                 {userName}
               </p>
             </div>
           </div>
 
-          <form className="space-y-6">
+          {params.error && (
+            <div className="mb-5 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-300">
+              {params.error}
+            </div>
+          )}
+
+          <form
+            action={joinRoom}
+            className="space-y-5"
+          >
             <div>
               <label
-                htmlFor="roomCode"
+                htmlFor="code"
                 className="mb-2 block text-sm font-bold text-white/70"
               >
                 Código da sala
               </label>
 
               <input
-                id="roomCode"
-                name="roomCode"
+                id="code"
+                name="code"
                 type="text"
-                placeholder="ABC123"
+                minLength={6}
                 maxLength={6}
-                autoComplete="off"
                 required
-                className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3.5 text-center text-xl font-black uppercase tracking-[0.3em] text-white outline-none transition placeholder:text-white/20 focus:border-[#ff1152]/60 focus:bg-white/[0.06] focus:ring-4 focus:ring-[#ff1152]/10"
+                autoFocus
+                autoComplete="off"
+                placeholder="ABC123"
+                className="h-14 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 text-center text-xl font-black uppercase tracking-[0.35em] text-white outline-none transition placeholder:text-white/15 focus:border-[#ff1152]/60 focus:ring-2 focus:ring-[#ff1152]/10"
               />
             </div>
 
             <button
-              type="button"
-              className="w-full rounded-2xl bg-[#ff1152] px-6 py-4 font-extrabold text-white shadow-[0_10px_35px_rgba(255,17,82,0.2)] transition hover:-translate-y-0.5 hover:bg-[#ff2c64] active:translate-y-0"
+              type="submit"
+              className="flex h-12 w-full items-center justify-center rounded-xl bg-[#ff1152] text-sm font-black transition hover:bg-[#ff2e65] active:scale-[0.99]"
             >
               Entrar na sala
             </button>
           </form>
-
-          <div className="mt-6 flex items-center justify-center gap-2 text-sm font-medium text-white/30">
-            <span className="h-2 w-2 rounded-full bg-[#ff1152]" />
-            Até 5 participantes por sala
-          </div>
         </div>
-
-        <p className="mt-6 text-center text-sm font-medium text-white/30">
-          Ainda não possui uma sala?{" "}
-          <Link
-            href="/criar-sala"
-            className="font-bold text-[#ff1152] transition hover:text-[#ff4676]"
-          >
-            Criar uma sala
-          </Link>
-        </p>
       </div>
     </main>
   );

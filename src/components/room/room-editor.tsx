@@ -1,7 +1,9 @@
 "use client";
 
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import {
   Brush,
+  Download,
   Eraser,
   Eye,
   EyeOff,
@@ -21,8 +23,11 @@ import {
   useState,
 } from "react";
 
+import { createClient } from "@/lib/supabase/client";
+
 type RoomEditorProps = {
   roomCode: string;
+  userId: string;
   userName: string;
   avatarUrl: string | null;
 };
@@ -64,6 +69,90 @@ type DragOverLayer = {
   position: "before" | "after";
 };
 
+type Participant = {
+  userId: string;
+  name: string;
+  avatarUrl: string | null;
+  onlineAt: string;
+};
+
+type PresencePayload = {
+  userId?: string;
+  name?: string;
+  avatarUrl?: string | null;
+  onlineAt?: string;
+  presence_ref?: string;
+};
+
+type StrokeStartPayload = {
+  userId: string;
+  layerId: string;
+  stroke: Stroke;
+};
+
+type StrokePointsPayload = {
+  userId: string;
+  layerId: string;
+  strokeId: string;
+  points: Point[];
+};
+
+type StrokeEndPayload = {
+  userId: string;
+  layerId: string;
+  strokeId: string;
+};
+
+type StrokeRemovePayload = {
+  userId: string;
+  layerId: string;
+  strokeId: string;
+};
+
+type LayerAddPayload = {
+  userId: string;
+  layer: Layer;
+};
+
+type LayerDeletePayload = {
+  userId: string;
+  layerId: string;
+};
+
+type LayerUpdatePayload = {
+  userId: string;
+  layerId: string;
+  visible?: boolean;
+  opacity?: number;
+};
+
+type LayerOrderPayload = {
+  userId: string;
+  layerIds: string[];
+};
+
+type StateRequestPayload = {
+  userId: string;
+};
+
+type SerializedLayerStrokes = {
+  layerId: string;
+  strokes: Stroke[];
+};
+
+type StateSnapshotPayload = {
+  userId: string;
+  targetUserId: string;
+  layers: Layer[];
+  strokes: SerializedLayerStrokes[];
+};
+
+type PendingStrokePoints = {
+  layerId: string;
+  strokeId: string;
+  points: Point[];
+};
+
 const PAGE_WIDTH = 3508;
 const PAGE_HEIGHT = 2480;
 
@@ -75,18 +164,38 @@ const MAX_ZOOM = 150;
 const ZOOM_STEP = 10;
 
 const MAX_UNDO_STEPS = 50;
+const MAX_PARTICIPANTS = 5;
 
 const MIN_VISIBLE_PAGE = 160;
 
 const INITIAL_LAYER_ID = "layer-1";
 
+const INITIAL_LAYERS: Layer[] = [
+  {
+    id: INITIAL_LAYER_ID,
+    name: "01",
+    visible: true,
+    opacity: 100,
+  },
+];
+
 export default function RoomEditor({
   roomCode,
+  userId,
   userName,
   avatarUrl,
 }: RoomEditorProps) {
   const workspaceRef =
     useRef<HTMLDivElement>(null);
+
+  const channelRef =
+    useRef<RealtimeChannel | null>(null);
+
+  const realtimeConnectedRef =
+    useRef(false);
+
+  const roomSessionIdRef =
+    useRef<string | null>(null);
 
   const isDrawingRef =
     useRef(false);
@@ -101,8 +210,11 @@ export default function RoomEditor({
     useRef<Point | null>(null);
 
   const currentStrokeRef =
-    useRef<CurrentStroke | null>(
-      null,
+    useRef<CurrentStroke | null>(null);
+
+  const remoteActiveStrokesRef =
+    useRef<Map<string, CurrentStroke>>(
+      new Map(),
     );
 
   const strokesByLayerRef =
@@ -114,6 +226,12 @@ export default function RoomEditor({
 
   const historyRef =
     useRef<HistoryEntry[]>([]);
+
+  const layersRef =
+    useRef<Layer[]>(INITIAL_LAYERS);
+
+  const activeLayerIdRef =
+    useRef(INITIAL_LAYER_ID);
 
   const layerCounterRef =
     useRef(1);
@@ -129,6 +247,17 @@ export default function RoomEditor({
   const thumbnailAnimationFrameRef =
     useRef<number | null>(null);
 
+  const pendingStrokePointsRef =
+    useRef<PendingStrokePoints | null>(
+      null,
+    );
+
+  const strokeBroadcastFrameRef =
+    useRef<number | null>(null);
+
+  const hasReceivedSnapshotRef =
+    useRef(false);
+
   const zoomRef =
     useRef(25);
 
@@ -141,15 +270,25 @@ export default function RoomEditor({
   const [mounted, setMounted] =
     useState(false);
 
-  const [layers, setLayers] =
-    useState<Layer[]>([
+  const [participants, setParticipants] =
+    useState<Participant[]>([
       {
-        id: INITIAL_LAYER_ID,
-        name: "01",
-        visible: true,
-        opacity: 100,
+        userId,
+        name: userName,
+        avatarUrl,
+        onlineAt: "",
       },
     ]);
+
+  const [
+    realtimeConnected,
+    setRealtimeConnected,
+  ] = useState(false);
+
+  const [layers, setLayers] =
+    useState<Layer[]>(
+      INITIAL_LAYERS,
+    );
 
   const [
     activeLayerId,
@@ -218,6 +357,9 @@ export default function RoomEditor({
         activeLayerId,
     ) ?? null;
 
+  const participantCount =
+    participants.length;
+
   useEffect(() => {
     setMounted(true);
 
@@ -230,175 +372,474 @@ export default function RoomEditor({
           thumbnailAnimationFrameRef.current,
         );
       }
+
+      if (
+        strokeBroadcastFrameRef.current !==
+        null
+      ) {
+        cancelAnimationFrame(
+          strokeBroadcastFrameRef.current,
+        );
+      }
     };
   }, []);
 
-  function formatLayerName(
-    number: number,
-  ) {
-    return String(
-      number,
-    ).padStart(2, "0");
-  }
+  useEffect(() => {
+    let disposed = false;
 
-  function getLayerCanvas(
-    layerId: string,
-  ) {
-    return (
-      workspaceRef.current?.querySelector<HTMLCanvasElement>(
-        `canvas[data-layer-id="${layerId}"]`,
-      ) ?? null
-    );
-  }
+    const supabase =
+      createClient();
 
-  function getLayerThumbnailCanvas(
-    layerId: string,
-  ) {
-    return document.querySelector<HTMLCanvasElement>(
-      `canvas[data-layer-thumbnail-id="${layerId}"]`,
-    );
-  }
+    const roomSessionId =
+      crypto.randomUUID();
 
-  function renderLayerThumbnail(
-    layerId: string,
-  ) {
-    const sourceCanvas =
-      getLayerCanvas(layerId);
+    roomSessionIdRef.current =
+      roomSessionId;
 
-    const thumbnailCanvas =
-      getLayerThumbnailCanvas(
-        layerId,
+    const channel =
+      supabase.channel(
+        `room:${roomCode}`,
+        {
+          config: {
+            private: true,
+            broadcast: {
+              self: false,
+            },
+          },
+        },
       );
 
-    if (
-      !sourceCanvas ||
-      !thumbnailCanvas
-    ) {
-      return;
+    channelRef.current =
+      channel;
+
+    async function heartbeatRoom() {
+      if (
+        disposed ||
+        !roomSessionIdRef.current
+      ) {
+        return;
+      }
+
+      const { error } =
+        await supabase.rpc(
+          "heartbeat_room_session",
+          {
+            p_room_code:
+              roomCode,
+            p_session_id:
+              roomSessionIdRef.current,
+          },
+        );
+
+      if (
+        error &&
+        !disposed
+      ) {
+        console.error(
+          "Erro no heartbeat da sala:",
+          error,
+        );
+      }
     }
 
-    const context =
-      thumbnailCanvas.getContext(
-        "2d",
-      );
-
-    if (!context) {
-      return;
-    }
-
-    context.clearRect(
-      0,
-      0,
-      thumbnailCanvas.width,
-      thumbnailCanvas.height,
-    );
-
-    context.drawImage(
-      sourceCanvas,
-      0,
-      0,
-      sourceCanvas.width,
-      sourceCanvas.height,
-      0,
-      0,
-      thumbnailCanvas.width,
-      thumbnailCanvas.height,
-    );
-  }
-
-  function scheduleLayerThumbnailUpdate(
-    layerId: string,
-  ) {
-    pendingThumbnailLayersRef.current.add(
-      layerId,
-    );
-
-    if (
-      thumbnailAnimationFrameRef.current !==
-      null
-    ) {
-      return;
-    }
-
-    thumbnailAnimationFrameRef.current =
-      requestAnimationFrame(() => {
-        const pendingLayers = [
-          ...pendingThumbnailLayersRef.current,
-        ];
-
-        pendingThumbnailLayersRef.current.clear();
-
-        thumbnailAnimationFrameRef.current =
-          null;
-
-        for (
-          const pendingLayerId of
-          pendingLayers
+    supabase.realtime.onHeartbeat(
+      (status) => {
+        if (
+          status === "ok"
         ) {
-          renderLayerThumbnail(
-            pendingLayerId,
+          void heartbeatRoom();
+        }
+      },
+    );
+
+    function syncParticipants() {
+      const presenceState =
+        channel.presenceState() as Record<
+          string,
+          PresencePayload[]
+        >;
+
+      const uniqueParticipants =
+        new Map<
+          string,
+          Participant
+        >();
+
+      for (
+        const presences of
+        Object.values(
+          presenceState,
+        )
+      ) {
+        for (
+          const presence of
+          presences
+        ) {
+          if (
+            !presence.userId ||
+            !presence.name
+          ) {
+            continue;
+          }
+
+          if (
+            uniqueParticipants.has(
+              presence.userId,
+            )
+          ) {
+            continue;
+          }
+
+          uniqueParticipants.set(
+            presence.userId,
+            {
+              userId:
+                presence.userId,
+              name:
+                presence.name,
+              avatarUrl:
+                presence.avatarUrl ??
+                null,
+              onlineAt:
+                presence.onlineAt ??
+                "",
+            },
           );
         }
-      });
-  }
+      }
 
-  function clampPan(
-    nextPan: Point,
-    zoomValue: number =
-      zoomRef.current,
-  ) {
-    const workspace =
-      workspaceRef.current;
+      if (
+        !uniqueParticipants.has(
+          userId,
+        )
+      ) {
+        uniqueParticipants.set(
+          userId,
+          {
+            userId,
+            name: userName,
+            avatarUrl,
+            onlineAt: "",
+          },
+        );
+      }
 
-    if (!workspace) {
-      return nextPan;
+      const nextParticipants =
+        [
+          ...uniqueParticipants.values(),
+        ].sort(
+          (
+            first,
+            second,
+          ) => {
+            if (
+              first.userId ===
+              userId
+            ) {
+              return -1;
+            }
+
+            if (
+              second.userId ===
+              userId
+            ) {
+              return 1;
+            }
+
+            return first.name.localeCompare(
+              second.name,
+              "pt-BR",
+            );
+          },
+        );
+
+      setParticipants(
+        nextParticipants,
+      );
     }
 
-    const rect =
-      workspace.getBoundingClientRect();
-
-    const scale =
-      zoomValue / 100;
-
-    const scaledPageWidth =
-      PAGE_WIDTH * scale;
-
-    const scaledPageHeight =
-      PAGE_HEIGHT * scale;
-
-    const maxPanX =
-      Math.max(
-        0,
-        rect.width / 2 +
-          scaledPageWidth / 2 -
-          MIN_VISIBLE_PAGE,
+    channel
+      .on(
+        "presence",
+        {
+          event: "sync",
+        },
+        syncParticipants,
+      )
+      .on(
+        "presence",
+        {
+          event: "join",
+        },
+        syncParticipants,
+      )
+      .on(
+        "presence",
+        {
+          event: "leave",
+        },
+        syncParticipants,
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "stroke-start",
+        },
+        ({ payload }) => {
+          handleRemoteStrokeStart(
+            payload as StrokeStartPayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "stroke-points",
+        },
+        ({ payload }) => {
+          handleRemoteStrokePoints(
+            payload as StrokePointsPayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "stroke-end",
+        },
+        ({ payload }) => {
+          handleRemoteStrokeEnd(
+            payload as StrokeEndPayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "stroke-remove",
+        },
+        ({ payload }) => {
+          handleRemoteStrokeRemove(
+            payload as StrokeRemovePayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "layer-add",
+        },
+        ({ payload }) => {
+          handleRemoteLayerAdd(
+            payload as LayerAddPayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "layer-delete",
+        },
+        ({ payload }) => {
+          handleRemoteLayerDelete(
+            payload as LayerDeletePayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "layer-update",
+        },
+        ({ payload }) => {
+          handleRemoteLayerUpdate(
+            payload as LayerUpdatePayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "layer-order",
+        },
+        ({ payload }) => {
+          handleRemoteLayerOrder(
+            payload as LayerOrderPayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "state-request",
+        },
+        ({ payload }) => {
+          handleStateRequest(
+            payload as StateRequestPayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "state-snapshot",
+        },
+        ({ payload }) => {
+          handleStateSnapshot(
+            payload as StateSnapshotPayload,
+          );
+        },
       );
 
-    const maxPanY =
-      Math.max(
-        0,
-        rect.height / 2 +
-          scaledPageHeight / 2 -
-          MIN_VISIBLE_PAGE,
+    async function connectRealtime() {
+      await supabase.realtime.setAuth();
+
+      if (disposed) {
+        return;
+      }
+
+      channel.subscribe(
+        async (
+          status,
+          error,
+        ) => {
+          if (disposed) {
+            return;
+          }
+
+          if (
+            status ===
+            "SUBSCRIBED"
+          ) {
+            const {
+              error:
+                sessionError,
+            } =
+              await supabase.rpc(
+                "start_room_session",
+                {
+                  p_room_code:
+                    roomCode,
+                  p_session_id:
+                    roomSessionId,
+                },
+              );
+
+            if (
+              sessionError
+            ) {
+              console.error(
+                "Erro ao iniciar sessão da sala:",
+                sessionError,
+              );
+
+              return;
+            }
+
+            realtimeConnectedRef.current =
+              true;
+
+            setRealtimeConnected(
+              true,
+            );
+
+            await channel.track({
+              userId,
+              name: userName,
+              avatarUrl,
+              onlineAt:
+                new Date().toISOString(),
+            });
+
+            void heartbeatRoom();
+
+            void channel.send({
+              type: "broadcast",
+              event:
+                "state-request",
+              payload: {
+                userId,
+              } satisfies StateRequestPayload,
+            });
+
+            return;
+          }
+
+          if (
+            status ===
+              "CHANNEL_ERROR" ||
+            status ===
+              "TIMED_OUT" ||
+            status ===
+              "CLOSED"
+          ) {
+            realtimeConnectedRef.current =
+              false;
+
+            setRealtimeConnected(
+              false,
+            );
+
+            if (error) {
+              console.error(
+                "Erro no Realtime:",
+                error,
+              );
+            }
+          }
+        },
+      );
+    }
+
+    void connectRealtime();
+
+    return () => {
+      disposed = true;
+
+      realtimeConnectedRef.current =
+        false;
+
+      if (
+        channelRef.current ===
+        channel
+      ) {
+        channelRef.current =
+          null;
+      }
+
+      roomSessionIdRef.current =
+        null;
+
+      void supabase.rpc(
+        "end_room_session",
+        {
+          p_session_id:
+            roomSessionId,
+        },
       );
 
-    return {
-      x: Math.max(
-        -maxPanX,
-        Math.min(
-          nextPan.x,
-          maxPanX,
-        ),
-      ),
-      y: Math.max(
-        -maxPanY,
-        Math.min(
-          nextPan.y,
-          maxPanY,
-        ),
-      ),
+      void channel.untrack();
+
+      void supabase.removeChannel(
+        channel,
+      );
     };
-  }
+  }, [
+    roomCode,
+    userId,
+    userName,
+    avatarUrl,
+  ]);
 
   useEffect(() => {
     const workspace =
@@ -496,8 +937,13 @@ export default function RoomEditor({
       panRef.current =
         nextPan;
 
-      setZoom(nextZoom);
-      setPan(nextPan);
+      setZoom(
+        nextZoom,
+      );
+
+      setPan(
+        nextPan,
+      );
     }
 
     workspace.addEventListener(
@@ -526,7 +972,9 @@ export default function RoomEditor({
         event.key.toLowerCase() ===
           "z";
 
-      if (!isUndoShortcut) {
+      if (
+        !isUndoShortcut
+      ) {
         return;
       }
 
@@ -548,6 +996,1004 @@ export default function RoomEditor({
     };
   }, []);
 
+  function sendBroadcast(
+    event: string,
+    payload: object,
+  ) {
+    const channel =
+      channelRef.current;
+
+    if (
+      !channel ||
+      !realtimeConnectedRef.current
+    ) {
+      return;
+    }
+
+    void channel.send({
+      type: "broadcast",
+      event,
+      payload,
+    });
+  }
+
+  function commitLayers(
+    nextLayers: Layer[],
+  ) {
+    layersRef.current =
+      nextLayers;
+
+    setLayers(
+      nextLayers,
+    );
+  }
+
+  function selectLayer(
+    layerId: string,
+  ) {
+    activeLayerIdRef.current =
+      layerId;
+
+    setActiveLayerId(
+      layerId,
+    );
+  }
+
+  function formatLayerName(
+    number: number,
+  ) {
+    return String(
+      number,
+    ).padStart(
+      2,
+      "0",
+    );
+  }
+
+  function getLayerCanvas(
+    layerId: string,
+  ) {
+    return (
+      workspaceRef.current?.querySelector<HTMLCanvasElement>(
+        `canvas[data-layer-id="${layerId}"]`,
+      ) ?? null
+    );
+  }
+
+  function getLayerThumbnailCanvas(
+    layerId: string,
+  ) {
+    return document.querySelector<HTMLCanvasElement>(
+      `canvas[data-layer-thumbnail-id="${layerId}"]`,
+    );
+  }
+
+  function renderLayerThumbnail(
+    layerId: string,
+  ) {
+    const sourceCanvas =
+      getLayerCanvas(
+        layerId,
+      );
+
+    const thumbnailCanvas =
+      getLayerThumbnailCanvas(
+        layerId,
+      );
+
+    if (
+      !sourceCanvas ||
+      !thumbnailCanvas
+    ) {
+      return;
+    }
+
+    const context =
+      thumbnailCanvas.getContext(
+        "2d",
+      );
+
+    if (!context) {
+      return;
+    }
+
+    context.clearRect(
+      0,
+      0,
+      thumbnailCanvas.width,
+      thumbnailCanvas.height,
+    );
+
+    context.drawImage(
+      sourceCanvas,
+      0,
+      0,
+      sourceCanvas.width,
+      sourceCanvas.height,
+      0,
+      0,
+      thumbnailCanvas.width,
+      thumbnailCanvas.height,
+    );
+  }
+
+  function scheduleLayerThumbnailUpdate(
+    layerId: string,
+  ) {
+    pendingThumbnailLayersRef.current.add(
+      layerId,
+    );
+
+    if (
+      thumbnailAnimationFrameRef.current !==
+      null
+    ) {
+      return;
+    }
+
+    thumbnailAnimationFrameRef.current =
+      requestAnimationFrame(
+        () => {
+          const pendingLayers =
+            [
+              ...pendingThumbnailLayersRef.current,
+            ];
+
+          pendingThumbnailLayersRef.current.clear();
+
+          thumbnailAnimationFrameRef.current =
+            null;
+
+          for (
+            const pendingLayerId of
+            pendingLayers
+          ) {
+            renderLayerThumbnail(
+              pendingLayerId,
+            );
+          }
+        },
+      );
+  }
+
+  function cloneStroke(
+    stroke: Stroke,
+  ): Stroke {
+    return {
+      ...stroke,
+      points:
+        stroke.points.map(
+          (point) => ({
+            ...point,
+          }),
+        ),
+    };
+  }
+
+  function flushPendingStrokePoints() {
+    if (
+      strokeBroadcastFrameRef.current !==
+      null
+    ) {
+      cancelAnimationFrame(
+        strokeBroadcastFrameRef.current,
+      );
+
+      strokeBroadcastFrameRef.current =
+        null;
+    }
+
+    const pending =
+      pendingStrokePointsRef.current;
+
+    pendingStrokePointsRef.current =
+      null;
+
+    if (
+      !pending ||
+      pending.points.length ===
+        0
+    ) {
+      return;
+    }
+
+    sendBroadcast(
+      "stroke-points",
+      {
+        userId,
+        layerId:
+          pending.layerId,
+        strokeId:
+          pending.strokeId,
+        points:
+          pending.points,
+      } satisfies StrokePointsPayload,
+    );
+  }
+
+  function queueStrokePointBroadcast(
+    layerId: string,
+    strokeId: string,
+    point: Point,
+  ) {
+    const pending =
+      pendingStrokePointsRef.current;
+
+    if (
+      !pending ||
+      pending.layerId !==
+        layerId ||
+      pending.strokeId !==
+        strokeId
+    ) {
+      flushPendingStrokePoints();
+
+      pendingStrokePointsRef.current =
+        {
+          layerId,
+          strokeId,
+          points: [],
+        };
+    }
+
+    pendingStrokePointsRef.current?.points.push(
+      point,
+    );
+
+    if (
+      strokeBroadcastFrameRef.current !==
+      null
+    ) {
+      return;
+    }
+
+    strokeBroadcastFrameRef.current =
+      requestAnimationFrame(
+        () => {
+          strokeBroadcastFrameRef.current =
+            null;
+
+          const framePending =
+            pendingStrokePointsRef.current;
+
+          pendingStrokePointsRef.current =
+            null;
+
+          if (
+            !framePending ||
+            framePending.points
+              .length === 0
+          ) {
+            return;
+          }
+
+          sendBroadcast(
+            "stroke-points",
+            {
+              userId,
+              layerId:
+                framePending.layerId,
+              strokeId:
+                framePending.strokeId,
+              points:
+                framePending.points,
+            } satisfies StrokePointsPayload,
+          );
+        },
+      );
+  }
+
+  function ensureRemoteLayer(
+    layerId: string,
+  ) {
+    const existing =
+      layersRef.current.find(
+        (layer) =>
+          layer.id ===
+          layerId,
+      );
+
+    if (existing) {
+      return;
+    }
+
+    const nextNumber =
+      layerCounterRef.current +
+      1;
+
+    layerCounterRef.current =
+      nextNumber;
+
+    const layer: Layer = {
+      id: layerId,
+      name:
+        formatLayerName(
+          nextNumber,
+        ),
+      visible: true,
+      opacity: 100,
+    };
+
+    strokesByLayerRef.current.set(
+      layerId,
+      [],
+    );
+
+    commitLayers([
+      ...layersRef.current,
+      layer,
+    ]);
+  }
+
+  function handleRemoteStrokeStart(
+    payload: StrokeStartPayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    ensureRemoteLayer(
+      payload.layerId,
+    );
+
+    const strokes =
+      strokesByLayerRef.current.get(
+        payload.layerId,
+      ) ?? [];
+
+    if (
+      strokes.some(
+        (stroke) =>
+          stroke.id ===
+          payload.stroke.id,
+      )
+    ) {
+      return;
+    }
+
+    const stroke =
+      cloneStroke(
+        payload.stroke,
+      );
+
+    strokes.push(
+      stroke,
+    );
+
+    strokesByLayerRef.current.set(
+      payload.layerId,
+      strokes,
+    );
+
+    remoteActiveStrokesRef.current.set(
+      stroke.id,
+      {
+        layerId:
+          payload.layerId,
+        stroke,
+      },
+    );
+
+    const canvas =
+      getLayerCanvas(
+        payload.layerId,
+      );
+
+    const context =
+      canvas?.getContext(
+        "2d",
+      );
+
+    const firstPoint =
+      stroke.points[0];
+
+    if (
+      context &&
+      firstPoint
+    ) {
+      drawStrokePoint(
+        context,
+        stroke,
+        firstPoint,
+      );
+
+      scheduleLayerThumbnailUpdate(
+        payload.layerId,
+      );
+
+      return;
+    }
+
+    requestAnimationFrame(
+      () => {
+        renderLayer(
+          payload.layerId,
+        );
+      },
+    );
+  }
+
+  function handleRemoteStrokePoints(
+    payload: StrokePointsPayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    const currentStroke =
+      remoteActiveStrokesRef.current.get(
+        payload.strokeId,
+      );
+
+    if (!currentStroke) {
+      return;
+    }
+
+    const canvas =
+      getLayerCanvas(
+        currentStroke.layerId,
+      );
+
+    const context =
+      canvas?.getContext(
+        "2d",
+      );
+
+    for (
+      const point of
+      payload.points
+    ) {
+      const previousPoint =
+        currentStroke.stroke
+          .points[
+          currentStroke.stroke
+            .points.length -
+            1
+        ];
+
+      currentStroke.stroke.points.push(
+        point,
+      );
+
+      if (
+        context &&
+        previousPoint
+      ) {
+        drawStrokeSegment(
+          context,
+          currentStroke.stroke,
+          previousPoint,
+          point,
+        );
+      }
+    }
+
+    if (!context) {
+      requestAnimationFrame(
+        () => {
+          renderLayer(
+            currentStroke.layerId,
+          );
+        },
+      );
+    }
+
+    scheduleLayerThumbnailUpdate(
+      currentStroke.layerId,
+    );
+  }
+
+  function handleRemoteStrokeEnd(
+    payload: StrokeEndPayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    remoteActiveStrokesRef.current.delete(
+      payload.strokeId,
+    );
+
+    renderLayerThumbnail(
+      payload.layerId,
+    );
+  }
+
+  function handleRemoteStrokeRemove(
+    payload: StrokeRemovePayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    const strokes =
+      strokesByLayerRef.current.get(
+        payload.layerId,
+      );
+
+    if (!strokes) {
+      return;
+    }
+
+    const index =
+      strokes.findIndex(
+        (stroke) =>
+          stroke.id ===
+          payload.strokeId,
+      );
+
+    if (
+      index === -1
+    ) {
+      return;
+    }
+
+    strokes.splice(
+      index,
+      1,
+    );
+
+    remoteActiveStrokesRef.current.delete(
+      payload.strokeId,
+    );
+
+    renderLayer(
+      payload.layerId,
+    );
+  }
+
+  function handleRemoteLayerAdd(
+    payload: LayerAddPayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    if (
+      layersRef.current.some(
+        (layer) =>
+          layer.id ===
+          payload.layer.id,
+      )
+    ) {
+      return;
+    }
+
+    strokesByLayerRef.current.set(
+      payload.layer.id,
+      [],
+    );
+
+    const numericName =
+      Number.parseInt(
+        payload.layer.name,
+        10,
+      );
+
+    if (
+      Number.isFinite(
+        numericName,
+      )
+    ) {
+      layerCounterRef.current =
+        Math.max(
+          layerCounterRef.current,
+          numericName,
+        );
+    }
+
+    commitLayers([
+      ...layersRef.current,
+      payload.layer,
+    ]);
+
+    requestAnimationFrame(
+      () => {
+        renderLayer(
+          payload.layer.id,
+        );
+      },
+    );
+  }
+
+  function handleRemoteLayerDelete(
+    payload: LayerDeletePayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    const remainingLayers =
+      layersRef.current.filter(
+        (layer) =>
+          layer.id !==
+          payload.layerId,
+      );
+
+    if (
+      remainingLayers.length ===
+      layersRef.current.length
+    ) {
+      return;
+    }
+
+    strokesByLayerRef.current.delete(
+      payload.layerId,
+    );
+
+    remoteActiveStrokesRef.current.forEach(
+      (
+        currentStroke,
+        strokeId,
+      ) => {
+        if (
+          currentStroke.layerId ===
+          payload.layerId
+        ) {
+          remoteActiveStrokesRef.current.delete(
+            strokeId,
+          );
+        }
+      },
+    );
+
+    historyRef.current =
+      historyRef.current.filter(
+        (entry) =>
+          entry.layerId !==
+          payload.layerId,
+      );
+
+    commitLayers(
+      remainingLayers,
+    );
+
+    setUndoAvailable(
+      historyRef.current.length,
+    );
+
+    if (
+      activeLayerIdRef.current ===
+        payload.layerId &&
+      remainingLayers.length >
+        0
+    ) {
+      selectLayer(
+        remainingLayers[
+          remainingLayers.length -
+          1
+        ].id,
+      );
+    }
+  }
+
+  function handleRemoteLayerUpdate(
+    payload: LayerUpdatePayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    const nextLayers =
+      layersRef.current.map(
+        (layer) => {
+          if (
+            layer.id !==
+            payload.layerId
+          ) {
+            return layer;
+          }
+
+          return {
+            ...layer,
+            visible:
+              payload.visible ??
+              layer.visible,
+            opacity:
+              payload.opacity ??
+              layer.opacity,
+          };
+        },
+      );
+
+    commitLayers(
+      nextLayers,
+    );
+  }
+
+  function handleRemoteLayerOrder(
+    payload: LayerOrderPayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    const layerMap =
+      new Map(
+        layersRef.current.map(
+          (layer) => [
+            layer.id,
+            layer,
+          ],
+        ),
+      );
+
+    const ordered: Layer[] =
+      [];
+
+    for (
+      const layerId of
+      payload.layerIds
+    ) {
+      const layer =
+        layerMap.get(
+          layerId,
+        );
+
+      if (!layer) {
+        continue;
+      }
+
+      ordered.push(
+        layer,
+      );
+
+      layerMap.delete(
+        layerId,
+      );
+    }
+
+    ordered.push(
+      ...layerMap.values(),
+    );
+
+    commitLayers(
+      ordered,
+    );
+  }
+
+  function handleStateRequest(
+    payload: StateRequestPayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    const serializedStrokes: SerializedLayerStrokes[] =
+      [
+        ...strokesByLayerRef.current.entries(),
+      ].map(
+        ([
+          layerId,
+          strokes,
+        ]) => ({
+          layerId,
+          strokes:
+            strokes.map(
+              cloneStroke,
+            ),
+        }),
+      );
+
+    sendBroadcast(
+      "state-snapshot",
+      {
+        userId,
+        targetUserId:
+          payload.userId,
+        layers:
+          layersRef.current.map(
+            (layer) => ({
+              ...layer,
+            }),
+          ),
+        strokes:
+          serializedStrokes,
+      } satisfies StateSnapshotPayload,
+    );
+  }
+
+  function handleStateSnapshot(
+    payload: StateSnapshotPayload,
+  ) {
+    if (
+      payload.targetUserId !==
+        userId ||
+      payload.userId ===
+        userId ||
+      hasReceivedSnapshotRef.current
+    ) {
+      return;
+    }
+
+    if (
+      payload.layers.length ===
+      0
+    ) {
+      return;
+    }
+
+    hasReceivedSnapshotRef.current =
+      true;
+
+    const nextLayers =
+      payload.layers.map(
+        (layer) => ({
+          ...layer,
+        }),
+      );
+
+    const nextStrokes =
+      new Map<
+        string,
+        Stroke[]
+      >();
+
+    for (
+      const layer of
+      nextLayers
+    ) {
+      nextStrokes.set(
+        layer.id,
+        [],
+      );
+    }
+
+    for (
+      const entry of
+      payload.strokes
+    ) {
+      nextStrokes.set(
+        entry.layerId,
+        entry.strokes.map(
+          cloneStroke,
+        ),
+      );
+    }
+
+    strokesByLayerRef.current =
+      nextStrokes;
+
+    historyRef.current =
+      [];
+
+    remoteActiveStrokesRef.current.clear();
+
+    setUndoAvailable(
+      0,
+    );
+
+    commitLayers(
+      nextLayers,
+    );
+
+    const numericNames =
+      nextLayers
+        .map(
+          (layer) =>
+            Number.parseInt(
+              layer.name,
+              10,
+            ),
+        )
+        .filter(
+          Number.isFinite,
+        );
+
+    layerCounterRef.current =
+      numericNames.length >
+      0
+        ? Math.max(
+            ...numericNames,
+          )
+        : nextLayers.length;
+
+    selectLayer(
+      nextLayers[
+        nextLayers.length -
+        1
+      ].id,
+    );
+
+    requestAnimationFrame(
+      () => {
+        for (
+          const layer of
+          nextLayers
+        ) {
+          renderLayer(
+            layer.id,
+          );
+        }
+      },
+    );
+  }
+
+  function clampPan(
+    nextPan: Point,
+    zoomValue: number =
+      zoomRef.current,
+  ) {
+    const workspace =
+      workspaceRef.current;
+
+    if (!workspace) {
+      return nextPan;
+    }
+
+    const rect =
+      workspace.getBoundingClientRect();
+
+    const scale =
+      zoomValue / 100;
+
+    const scaledPageWidth =
+      PAGE_WIDTH * scale;
+
+    const scaledPageHeight =
+      PAGE_HEIGHT * scale;
+
+    const maxPanX =
+      Math.max(
+        0,
+        rect.width / 2 +
+          scaledPageWidth / 2 -
+          MIN_VISIBLE_PAGE,
+      );
+
+    const maxPanY =
+      Math.max(
+        0,
+        rect.height / 2 +
+          scaledPageHeight / 2 -
+          MIN_VISIBLE_PAGE,
+      );
+
+    return {
+      x: Math.max(
+        -maxPanX,
+        Math.min(
+          nextPan.x,
+          maxPanX,
+        ),
+      ),
+      y: Math.max(
+        -maxPanY,
+        Math.min(
+          nextPan.y,
+          maxPanY,
+        ),
+      ),
+    };
+  }
+
   function getCanvasPoint(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
@@ -563,7 +2009,6 @@ export default function RoomEditor({
           rect.left) *
         (canvas.width /
           rect.width),
-
       y:
         (event.clientY -
           rect.top) *
@@ -673,7 +2118,9 @@ export default function RoomEditor({
     }
 
     const context =
-      canvas.getContext("2d");
+      canvas.getContext(
+        "2d",
+      );
 
     if (!context) {
       return;
@@ -717,21 +2164,15 @@ export default function RoomEditor({
         stroke.points.length;
         index++
       ) {
-        const previousPoint =
-          stroke.points[
-            index - 1
-          ];
-
-        const currentPoint =
-          stroke.points[
-            index
-          ];
-
         drawStrokeSegment(
           context,
           stroke,
-          previousPoint,
-          currentPoint,
+          stroke.points[
+            index - 1
+          ],
+          stroke.points[
+            index
+          ],
         );
       }
     }
@@ -759,8 +2200,7 @@ export default function RoomEditor({
 
     if (!strokes) {
       setUndoAvailable(
-        historyRef.current
-          .length,
+        historyRef.current.length,
       );
 
       return;
@@ -787,8 +2227,18 @@ export default function RoomEditor({
     );
 
     setUndoAvailable(
-      historyRef.current
-        .length,
+      historyRef.current.length,
+    );
+
+    sendBroadcast(
+      "stroke-remove",
+      {
+        userId,
+        layerId:
+          historyEntry.layerId,
+        strokeId:
+          historyEntry.strokeId,
+      } satisfies StrokeRemovePayload,
     );
   }
 
@@ -796,12 +2246,7 @@ export default function RoomEditor({
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
     if (
-      event.button !== 0
-    ) {
-      return;
-    }
-
-    if (
+      event.button !== 0 ||
       !activeLayer ||
       !activeLayer.visible
     ) {
@@ -817,22 +2262,41 @@ export default function RoomEditor({
       );
 
     const context =
-      canvas.getContext("2d");
+      canvas.getContext(
+        "2d",
+      );
 
     if (!context) {
       return;
     }
 
     const stroke: Stroke = {
-      id: crypto.randomUUID(),
+      id:
+        crypto.randomUUID(),
       tool,
       color,
       size:
         tool === "brush"
           ? brushSize
           : eraserSize,
-      points: [point],
+      points: [
+        point,
+      ],
     };
+
+    const strokes =
+      strokesByLayerRef.current.get(
+        activeLayerId,
+      ) ?? [];
+
+    strokes.push(
+      stroke,
+    );
+
+    strokesByLayerRef.current.set(
+      activeLayerId,
+      strokes,
+    );
 
     canvas.setPointerCapture(
       event.pointerId,
@@ -859,6 +2323,19 @@ export default function RoomEditor({
 
     scheduleLayerThumbnailUpdate(
       activeLayerId,
+    );
+
+    sendBroadcast(
+      "stroke-start",
+      {
+        userId,
+        layerId:
+          activeLayerId,
+        stroke:
+          cloneStroke(
+            stroke,
+          ),
+      } satisfies StrokeStartPayload,
     );
   }
 
@@ -915,6 +2392,12 @@ export default function RoomEditor({
     scheduleLayerThumbnailUpdate(
       currentStroke.layerId,
     );
+
+    queueStrokePointBroadcast(
+      currentStroke.layerId,
+      currentStroke.stroke.id,
+      currentPoint,
+    );
   }
 
   function handleCanvasPointerUp(
@@ -940,19 +2423,7 @@ export default function RoomEditor({
       isDrawingRef.current &&
       currentStroke
     ) {
-      const strokes =
-        strokesByLayerRef.current.get(
-          currentStroke.layerId,
-        ) ?? [];
-
-      strokes.push(
-        currentStroke.stroke,
-      );
-
-      strokesByLayerRef.current.set(
-        currentStroke.layerId,
-        strokes,
-      );
+      flushPendingStrokePoints();
 
       historyRef.current.push(
         {
@@ -964,20 +2435,29 @@ export default function RoomEditor({
       );
 
       if (
-        historyRef.current
-          .length >
+        historyRef.current.length >
         MAX_UNDO_STEPS
       ) {
         historyRef.current.shift();
       }
 
       setUndoAvailable(
-        historyRef.current
-          .length,
+        historyRef.current.length,
       );
 
       renderLayerThumbnail(
         currentStroke.layerId,
+      );
+
+      sendBroadcast(
+        "stroke-end",
+        {
+          userId,
+          layerId:
+            currentStroke.layerId,
+          strokeId:
+            currentStroke.stroke.id,
+        } satisfies StrokeEndPayload,
       );
     }
 
@@ -1011,8 +2491,10 @@ export default function RoomEditor({
 
     lastPanPointRef.current =
       {
-        x: event.clientX,
-        y: event.clientY,
+        x:
+          event.clientX,
+        y:
+          event.clientY,
       };
 
     event.currentTarget.setPointerCapture(
@@ -1036,34 +2518,31 @@ export default function RoomEditor({
       return;
     }
 
-    const deltaX =
-      event.clientX -
-      lastPoint.x;
-
-    const deltaY =
-      event.clientY -
-      lastPoint.y;
-
     const nextPan =
       clampPan({
         x:
           panRef.current.x +
-          deltaX,
-
+          event.clientX -
+          lastPoint.x,
         y:
           panRef.current.y +
-          deltaY,
+          event.clientY -
+          lastPoint.y,
       });
 
     panRef.current =
       nextPan;
 
-    setPan(nextPan);
+    setPan(
+      nextPan,
+    );
 
     lastPanPointRef.current =
       {
-        x: event.clientX,
-        y: event.clientY,
+        x:
+          event.clientX,
+        y:
+          event.clientY,
       };
   }
 
@@ -1122,53 +2601,77 @@ export default function RoomEditor({
     const layerId =
       crypto.randomUUID();
 
-    const newLayer: Layer =
-      {
-        id: layerId,
-        name: formatLayerName(
+    const newLayer: Layer = {
+      id: layerId,
+      name:
+        formatLayerName(
           layerCounterRef.current,
         ),
-        visible: true,
-        opacity: 100,
-      };
+      visible: true,
+      opacity: 100,
+    };
 
     strokesByLayerRef.current.set(
       layerId,
       [],
     );
 
-    setLayers(
-      (
-        currentLayers,
-      ) => [
-        ...currentLayers,
-        newLayer,
-      ],
+    commitLayers([
+      ...layersRef.current,
+      newLayer,
+    ]);
+
+    selectLayer(
+      layerId,
     );
 
-    setActiveLayerId(
-      layerId,
+    sendBroadcast(
+      "layer-add",
+      {
+        userId,
+        layer:
+          newLayer,
+      } satisfies LayerAddPayload,
     );
   }
 
   function toggleLayerVisibility(
     layerId: string,
   ) {
-    setLayers(
-      (
-        currentLayers,
-      ) =>
-        currentLayers.map(
-          (layer) =>
-            layer.id ===
-            layerId
-              ? {
-                  ...layer,
-                  visible:
-                    !layer.visible,
-                }
-              : layer,
-        ),
+    const currentLayer =
+      layersRef.current.find(
+        (layer) =>
+          layer.id ===
+          layerId,
+      );
+
+    if (!currentLayer) {
+      return;
+    }
+
+    const visible =
+      !currentLayer.visible;
+
+    commitLayers(
+      layersRef.current.map(
+        (layer) =>
+          layer.id ===
+          layerId
+            ? {
+                ...layer,
+                visible,
+              }
+            : layer,
+      ),
+    );
+
+    sendBroadcast(
+      "layer-update",
+      {
+        userId,
+        layerId,
+        visible,
+      } satisfies LayerUpdatePayload,
     );
   }
 
@@ -1185,21 +2688,28 @@ export default function RoomEditor({
         ),
       );
 
-    setLayers(
-      (
-        currentLayers,
-      ) =>
-        currentLayers.map(
-          (layer) =>
-            layer.id ===
-            layerId
-              ? {
-                  ...layer,
-                  opacity:
-                    safeOpacity,
-                }
-              : layer,
-        ),
+    commitLayers(
+      layersRef.current.map(
+        (layer) =>
+          layer.id ===
+          layerId
+            ? {
+                ...layer,
+                opacity:
+                  safeOpacity,
+              }
+            : layer,
+      ),
+    );
+
+    sendBroadcast(
+      "layer-update",
+      {
+        userId,
+        layerId,
+        opacity:
+          safeOpacity,
+      } satisfies LayerUpdatePayload,
     );
   }
 
@@ -1207,13 +2717,14 @@ export default function RoomEditor({
     layerId: string,
   ) {
     if (
-      layers.length <= 1
+      layersRef.current.length <=
+      1
     ) {
       return;
     }
 
     const remainingLayers =
-      layers.filter(
+      layersRef.current.filter(
         (layer) =>
           layer.id !==
           layerId,
@@ -1234,26 +2745,95 @@ export default function RoomEditor({
       layerId,
     );
 
-    setUndoAvailable(
-      historyRef.current
-        .length,
-    );
-
-    setLayers(
+    commitLayers(
       remainingLayers,
     );
 
+    setUndoAvailable(
+      historyRef.current.length,
+    );
+
     if (
-      activeLayerId ===
+      activeLayerIdRef.current ===
       layerId
     ) {
-      setActiveLayerId(
+      selectLayer(
         remainingLayers[
           remainingLayers.length -
-            1
+          1
         ].id,
       );
     }
+
+    sendBroadcast(
+      "layer-delete",
+      {
+        userId,
+        layerId,
+      } satisfies LayerDeletePayload,
+    );
+  }
+
+  function reorderLayers(
+    currentLayers: Layer[],
+    draggedLayerId: string,
+    targetLayerId: string,
+    position:
+      | "before"
+      | "after",
+  ) {
+    const displayedLayers =
+      [
+        ...currentLayers,
+      ].reverse();
+
+    const draggedIndex =
+      displayedLayers.findIndex(
+        (layer) =>
+          layer.id ===
+          draggedLayerId,
+      );
+
+    if (
+      draggedIndex === -1
+    ) {
+      return currentLayers;
+    }
+
+    const [
+      draggedLayer,
+    ] =
+      displayedLayers.splice(
+        draggedIndex,
+        1,
+      );
+
+    const targetIndex =
+      displayedLayers.findIndex(
+        (layer) =>
+          layer.id ===
+          targetLayerId,
+      );
+
+    if (
+      targetIndex === -1
+    ) {
+      return currentLayers;
+    }
+
+    const insertIndex =
+      position ===
+      "after"
+        ? targetIndex + 1
+        : targetIndex;
+
+    displayedLayers.splice(
+      insertIndex,
+      0,
+      draggedLayer,
+    );
+
+    return displayedLayers.reverse();
   }
 
   function handleLayerDragStart(
@@ -1296,13 +2876,10 @@ export default function RoomEditor({
     const rect =
       event.currentTarget.getBoundingClientRect();
 
-    const middle =
-      rect.top +
-      rect.height / 2;
-
     const position =
       event.clientY <
-      middle
+      rect.top +
+        rect.height / 2
         ? "before"
         : "after";
 
@@ -1342,76 +2919,37 @@ export default function RoomEditor({
     const rect =
       event.currentTarget.getBoundingClientRect();
 
-    const middle =
-      rect.top +
-      rect.height / 2;
-
-    const position =
+    const position:
+      | "before"
+      | "after" =
       event.clientY <
-      middle
+      rect.top +
+        rect.height / 2
         ? "before"
         : "after";
 
-    setLayers(
-      (
-        currentLayers,
-      ) => {
-        const displayedLayers =
-          [
-            ...currentLayers,
-          ].reverse();
+    const nextLayers =
+      reorderLayers(
+        layersRef.current,
+        draggedLayerId,
+        targetLayerId,
+        position,
+      );
 
-        const draggedIndex =
-          displayedLayers.findIndex(
+    commitLayers(
+      nextLayers,
+    );
+
+    sendBroadcast(
+      "layer-order",
+      {
+        userId,
+        layerIds:
+          nextLayers.map(
             (layer) =>
-              layer.id ===
-              draggedLayerId,
-          );
-
-        if (
-          draggedIndex ===
-          -1
-        ) {
-          return currentLayers;
-        }
-
-        const [
-          draggedLayer,
-        ] =
-          displayedLayers.splice(
-            draggedIndex,
-            1,
-          );
-
-        const targetIndex =
-          displayedLayers.findIndex(
-            (layer) =>
-              layer.id ===
-              targetLayerId,
-          );
-
-        if (
-          targetIndex ===
-          -1
-        ) {
-          return currentLayers;
-        }
-
-        const insertIndex =
-          position ===
-          "after"
-            ? targetIndex +
-              1
-            : targetIndex;
-
-        displayedLayers.splice(
-          insertIndex,
-          0,
-          draggedLayer,
-        );
-
-        return displayedLayers.reverse();
-      },
+              layer.id,
+          ),
+      } satisfies LayerOrderPayload,
     );
 
     draggedLayerIdRef.current =
@@ -1428,6 +2966,128 @@ export default function RoomEditor({
 
     setDragOverLayer(
       null,
+    );
+  }
+
+  function handleDownload() {
+    const exportCanvas =
+      document.createElement(
+        "canvas",
+      );
+
+    exportCanvas.width =
+      PAGE_WIDTH;
+
+    exportCanvas.height =
+      PAGE_HEIGHT;
+
+    const context =
+      exportCanvas.getContext(
+        "2d",
+      );
+
+    if (!context) {
+      return;
+    }
+
+    context.globalCompositeOperation =
+      "source-over";
+
+    context.globalAlpha =
+      1;
+
+    context.fillStyle =
+      "#ffffff";
+
+    context.fillRect(
+      0,
+      0,
+      PAGE_WIDTH,
+      PAGE_HEIGHT,
+    );
+
+    for (
+      const layer of
+      layersRef.current
+    ) {
+      if (
+        !layer.visible ||
+        layer.opacity <=
+          0
+      ) {
+        continue;
+      }
+
+      const layerCanvas =
+        getLayerCanvas(
+          layer.id,
+        );
+
+      if (!layerCanvas) {
+        continue;
+      }
+
+      context.globalAlpha =
+        layer.opacity /
+        100;
+
+      context.drawImage(
+        layerCanvas,
+        0,
+        0,
+      );
+    }
+
+    context.globalAlpha =
+      1;
+
+    exportCanvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          return;
+        }
+
+        const url =
+          URL.createObjectURL(
+            blob,
+          );
+
+        const anchor =
+          document.createElement(
+            "a",
+          );
+
+        anchor.href =
+          url;
+
+        anchor.download =
+          `box-${roomCode.toLowerCase()}.png`;
+
+        document.body.appendChild(
+          anchor,
+        );
+
+        anchor.click();
+
+        anchor.remove();
+
+        URL.revokeObjectURL(
+          url,
+        );
+      },
+      "image/png",
+    );
+  }
+
+  function getParticipantInitial(
+    name: string,
+  ) {
+    return (
+      name
+        .trim()
+        .charAt(0)
+        .toUpperCase() ||
+      "?"
     );
   }
 
@@ -1456,16 +3116,95 @@ export default function RoomEditor({
               {roomCode.toUpperCase()}
             </p>
 
-            <p className="text-xs font-medium text-white/30">
-              1 de 5 participantes
-            </p>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <div
+                className={`h-1.5 w-1.5 rounded-full ${
+                  realtimeConnected
+                    ? "bg-emerald-400"
+                    : "bg-yellow-400"
+                }`}
+              />
+
+              <p className="text-xs font-medium text-white/30">
+                {realtimeConnected
+                  ? `${participantCount} de ${MAX_PARTICIPANTS} online`
+                  : "Conectando..."}
+              </p>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="hidden rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/35 lg:block">
-            A4 horizontal • 3508 ×
-            2480 • 300 DPI
+        <div className="flex items-center gap-4">
+          <div className="hidden rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/35 xl:block">
+            A4 horizontal •
+            3508 × 2480 •
+            300 DPI
+          </div>
+
+          <button
+            type="button"
+            title="Baixar desenho em PNG"
+            onClick={
+              handleDownload
+            }
+            className="flex h-9 items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 text-xs font-bold text-white/60 transition hover:border-[#ff1152]/30 hover:bg-[#ff1152]/10 hover:text-white"
+          >
+            <Download
+              size={16}
+            />
+
+            <span className="hidden sm:inline">
+              Baixar
+            </span>
+          </button>
+
+          <div className="flex items-center">
+            {participants
+              .slice(
+                0,
+                MAX_PARTICIPANTS,
+              )
+              .map(
+                (
+                  participant,
+                  index,
+                ) => (
+                  <div
+                    key={
+                      participant.userId
+                    }
+                    title={
+                      participant.userId ===
+                      userId
+                        ? `${participant.name} (você)`
+                        : participant.name
+                    }
+                    className={`relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-[#0d0d12] bg-[#ff1152] text-xs font-black ${
+                      index > 0
+                        ? "-ml-2"
+                        : ""
+                    }`}
+                  >
+                    {participant.avatarUrl ? (
+                      <img
+                        src={
+                          participant.avatarUrl
+                        }
+                        alt={
+                          participant.name
+                        }
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      getParticipantInitial(
+                        participant.name,
+                      )
+                    )}
+
+                    <div className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-[#0d0d12] bg-emerald-400" />
+                  </div>
+                ),
+              )}
           </div>
 
           <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-1.5 pr-3">
@@ -1509,7 +3248,8 @@ export default function RoomEditor({
               )
             }
             className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
-              tool === "brush"
+              tool ===
+              "brush"
                 ? "bg-[#ff1152] text-white"
                 : "text-white/40 hover:bg-white/[0.06] hover:text-white"
             }`}
@@ -1528,7 +3268,8 @@ export default function RoomEditor({
               )
             }
             className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
-              tool === "eraser"
+              tool ===
+              "eraser"
                 ? "bg-[#ff1152] text-white"
                 : "text-white/40 hover:bg-white/[0.06] hover:text-white"
             }`}
@@ -1563,16 +3304,12 @@ export default function RoomEditor({
             "brush" && (
             <input
               type="color"
-              value={
-                color
-              }
+              value={color}
               onChange={(
                 event,
               ) =>
                 setColor(
-                  event
-                    .target
-                    .value,
+                  event.target.value,
                 )
               }
               className="h-9 w-9 cursor-pointer rounded-lg border-0 bg-transparent"
@@ -1603,9 +3340,7 @@ export default function RoomEditor({
             ) =>
               handleSizeChange(
                 Number(
-                  event
-                    .target
-                    .value,
+                  event.target.value,
                 ),
               )
             }
@@ -1621,9 +3356,7 @@ export default function RoomEditor({
           <div className="text-xs font-bold text-white/25">
             Undo{" "}
             {undoAvailable}/
-            {
-              MAX_UNDO_STEPS
-            }
+            {MAX_UNDO_STEPS}
           </div>
 
           <div className="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/50">
@@ -1816,7 +3549,7 @@ export default function RoomEditor({
                         layer.id
                       }
                       onClick={() =>
-                        setActiveLayerId(
+                        selectLayer(
                           layer.id,
                         )
                       }
@@ -2010,9 +3743,7 @@ export default function RoomEditor({
                             changeLayerOpacity(
                               layer.id,
                               Number(
-                                event
-                                  .target
-                                  .value,
+                                event.target.value,
                               ),
                             )
                           }
