@@ -172,6 +172,10 @@ type PendingStrokePoints = {
 const PAGE_WIDTH = 3508;
 const PAGE_HEIGHT = 2480;
 
+const PREVIEW_SCALE = 0.5;
+const PREVIEW_WIDTH = Math.round(PAGE_WIDTH * PREVIEW_SCALE);
+const PREVIEW_HEIGHT = Math.round(PAGE_HEIGHT * PREVIEW_SCALE);
+
 const THUMBNAIL_WIDTH = 140;
 const THUMBNAIL_HEIGHT = 99;
 
@@ -182,6 +186,11 @@ const ZOOM_STEP = 10;
 const MAX_UNDO_STEPS = 50;
 const MAX_PARTICIPANTS = 5;
 const MIN_VISIBLE_PAGE = 160;
+
+const STROKE_BROADCAST_INTERVAL_MS = 50;
+const CURSOR_BROADCAST_INTERVAL_MS = 100;
+const MIN_POINT_DISTANCE = 1.5;
+const MAX_POINTS_PER_PACKET = 48;
 
 const INITIAL_LAYER_ID = "layer-1";
 
@@ -244,15 +253,12 @@ export default function RoomEditor({
 
   const lastCursorBroadcastAtRef = useRef(0);
 
-  const participantCountRef = useRef(1);
-
   const participantNamesRef = useRef<Map<string, string>>(
     new Map([[userId, userName]]),
   );
 
   const localCursorElementRef = useRef<HTMLDivElement | null>(null);
   const localCursorLabelRef = useRef<HTMLDivElement | null>(null);
-
   const localCursorVisibleRef = useRef(false);
 
   const localCursorDataRef = useRef<CursorState>({
@@ -265,17 +271,17 @@ export default function RoomEditor({
     tool: "brush",
   });
 
-  const remoteCursorElementsRef = useRef<
-    Map<string, HTMLDivElement>
-  >(new Map());
+  const remoteCursorElementsRef = useRef<Map<string, HTMLDivElement>>(
+    new Map(),
+  );
 
-  const remoteCursorLabelsRef = useRef<
-    Map<string, HTMLDivElement>
-  >(new Map());
+  const remoteCursorLabelsRef = useRef<Map<string, HTMLDivElement>>(
+    new Map(),
+  );
 
-  const remoteCursorDataRef = useRef<
-    Map<string, CursorState>
-  >(new Map());
+  const remoteCursorDataRef = useRef<Map<string, CursorState>>(
+    new Map(),
+  );
 
   const hasReceivedSnapshotRef = useRef(false);
 
@@ -321,7 +327,6 @@ export default function RoomEditor({
     useState<DragOverLayer | null>(null);
 
   const userInitial = userName.charAt(0).toUpperCase();
-
   const currentSize = tool === "brush" ? brushSize : eraserSize;
 
   const activeLayer =
@@ -478,8 +483,6 @@ export default function RoomEditor({
         return first.name.localeCompare(second.name, "pt-BR");
       });
 
-      participantCountRef.current = nextParticipants.length;
-
       participantNamesRef.current = new Map(
         nextParticipants.map((participant) => [
           participant.userId,
@@ -494,7 +497,6 @@ export default function RoomEditor({
       for (const remoteUserId of remoteCursorDataRef.current.keys()) {
         if (!onlineIds.has(remoteUserId)) {
           remoteCursorDataRef.current.delete(remoteUserId);
-
           hideCursorElement(
             remoteCursorElementsRef.current.get(remoteUserId) ?? null,
           );
@@ -571,7 +573,6 @@ export default function RoomEditor({
               "Erro ao iniciar sessão da sala:",
               sessionError,
             );
-
             return;
           }
 
@@ -660,11 +661,8 @@ export default function RoomEditor({
 
       const rect = workspace.getBoundingClientRect();
 
-      const mouseX =
-        event.clientX - (rect.left + rect.width / 2);
-
-      const mouseY =
-        event.clientY - (rect.top + rect.height / 2);
+      const mouseX = event.clientX - (rect.left + rect.width / 2);
+      const mouseY = event.clientY - (rect.top + rect.height / 2);
 
       const currentZoom = zoomRef.current;
 
@@ -679,14 +677,10 @@ export default function RoomEditor({
 
       const currentScale = currentZoom / 100;
       const nextScale = nextZoom / 100;
-
       const currentPan = panRef.current;
 
-      const pointX =
-        (mouseX - currentPan.x) / currentScale;
-
-      const pointY =
-        (mouseY - currentPan.y) / currentScale;
+      const pointX = (mouseX - currentPan.x) / currentScale;
+      const pointY = (mouseY - currentPan.y) / currentScale;
 
       const nextPan = clampPan(
         {
@@ -747,16 +741,10 @@ export default function RoomEditor({
     });
   }
 
-  function getStrokeBroadcastInterval() {
-    const people = Math.max(1, participantCountRef.current);
-
-    return Math.max(40, people * 25);
-  }
-
-  function getCursorBroadcastInterval() {
-    const people = Math.max(1, participantCountRef.current);
-
-    return Math.max(100, people * 50);
+  function getPreviewContext(canvas: HTMLCanvasElement) {
+    return canvas.getContext("2d", {
+      desynchronized: true,
+    });
   }
 
   function flushCursorBroadcast() {
@@ -766,7 +754,6 @@ export default function RoomEditor({
     }
 
     const pending = pendingCursorBroadcastRef.current;
-
     pendingCursorBroadcastRef.current = null;
 
     if (!pending || isDrawingRef.current) {
@@ -774,7 +761,6 @@ export default function RoomEditor({
     }
 
     lastCursorBroadcastAtRef.current = performance.now();
-
     sendBroadcast("cursor-move", pending);
   }
 
@@ -785,11 +771,10 @@ export default function RoomEditor({
 
     pendingCursorBroadcastRef.current = cursor;
 
-    const interval = getCursorBroadcastInterval();
     const elapsed =
       performance.now() - lastCursorBroadcastAtRef.current;
 
-    if (elapsed >= interval) {
+    if (elapsed >= CURSOR_BROADCAST_INTERVAL_MS) {
       flushCursorBroadcast();
       return;
     }
@@ -800,7 +785,7 @@ export default function RoomEditor({
 
     cursorBroadcastTimerRef.current = setTimeout(
       flushCursorBroadcast,
-      interval - elapsed,
+      CURSOR_BROADCAST_INTERVAL_MS - elapsed,
     );
   }
 
@@ -811,7 +796,6 @@ export default function RoomEditor({
     }
 
     const pending = pendingStrokePointsRef.current;
-
     pendingStrokePointsRef.current = null;
 
     if (!pending || pending.points.length === 0) {
@@ -826,11 +810,15 @@ export default function RoomEditor({
     } satisfies StrokePointsPayload);
   }
 
-  function queueStrokePointBroadcast(
+  function queueStrokePointsBroadcast(
     layerId: string,
     strokeId: string,
-    point: Point,
+    points: Point[],
   ) {
+    if (points.length === 0) {
+      return;
+    }
+
     const pending = pendingStrokePointsRef.current;
 
     if (
@@ -847,10 +835,11 @@ export default function RoomEditor({
       };
     }
 
-    pendingStrokePointsRef.current?.points.push(point);
+    pendingStrokePointsRef.current?.points.push(...points);
 
     if (
-      (pendingStrokePointsRef.current?.points.length ?? 0) >= 48
+      (pendingStrokePointsRef.current?.points.length ?? 0) >=
+      MAX_POINTS_PER_PACKET
     ) {
       flushPendingStrokePoints();
       return;
@@ -862,7 +851,7 @@ export default function RoomEditor({
 
     strokeBroadcastTimerRef.current = setTimeout(
       flushPendingStrokePoints,
-      getStrokeBroadcastInterval(),
+      STROKE_BROADCAST_INTERVAL_MS,
     );
   }
 
@@ -879,7 +868,6 @@ export default function RoomEditor({
     element.style.width = `${cursor.size}px`;
     element.style.height = `${cursor.size}px`;
     element.style.borderColor = cursor.color;
-
     element.style.transform =
       `translate3d(${cursor.x}px, ${cursor.y}px, 0) ` +
       "translate(-50%, -50%)";
@@ -978,7 +966,6 @@ export default function RoomEditor({
 
   function hideLocalCursor() {
     localCursorVisibleRef.current = false;
-
     hideCursorElement(localCursorElementRef.current);
 
     pendingCursorBroadcastRef.current = null;
@@ -1129,7 +1116,6 @@ export default function RoomEditor({
     }
 
     const nextNumber = layerCounterRef.current + 1;
-
     layerCounterRef.current = nextNumber;
 
     const layer: Layer = {
@@ -1147,6 +1133,116 @@ export default function RoomEditor({
     ]);
   }
 
+  function configureContext(
+    context: CanvasRenderingContext2D,
+    stroke: Stroke,
+    renderScale: number,
+  ) {
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.lineWidth = stroke.size * renderScale;
+
+    if (stroke.tool === "brush") {
+      context.globalCompositeOperation = "source-over";
+      context.strokeStyle = stroke.color;
+      context.fillStyle = stroke.color;
+      return;
+    }
+
+    context.globalCompositeOperation = "destination-out";
+    context.strokeStyle = "#000000";
+    context.fillStyle = "#000000";
+  }
+
+  function drawStrokePoint(
+    context: CanvasRenderingContext2D,
+    stroke: Stroke,
+    point: Point,
+    renderScale = PREVIEW_SCALE,
+  ) {
+    configureContext(context, stroke, renderScale);
+
+    context.beginPath();
+    context.arc(
+      point.x * renderScale,
+      point.y * renderScale,
+      (stroke.size * renderScale) / 2,
+      0,
+      Math.PI * 2,
+    );
+    context.fill();
+  }
+
+  function drawStrokePolyline(
+    context: CanvasRenderingContext2D,
+    stroke: Stroke,
+    from: Point,
+    points: Point[],
+    renderScale = PREVIEW_SCALE,
+  ) {
+    if (points.length === 0) {
+      return;
+    }
+
+    configureContext(context, stroke, renderScale);
+
+    context.beginPath();
+    context.moveTo(
+      from.x * renderScale,
+      from.y * renderScale,
+    );
+
+    for (const point of points) {
+      context.lineTo(
+        point.x * renderScale,
+        point.y * renderScale,
+      );
+    }
+
+    context.stroke();
+  }
+
+  function renderLayer(layerId: string) {
+    const canvas = getLayerCanvas(layerId);
+
+    if (!canvas) {
+      return;
+    }
+
+    const context = getPreviewContext(canvas);
+
+    if (!context) {
+      return;
+    }
+
+    context.globalCompositeOperation = "source-over";
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    const strokes = strokesByLayerRef.current.get(layerId) ?? [];
+
+    for (const stroke of strokes) {
+      const firstPoint = stroke.points[0];
+
+      if (!firstPoint) {
+        continue;
+      }
+
+      drawStrokePoint(context, stroke, firstPoint);
+
+      if (stroke.points.length > 1) {
+        drawStrokePolyline(
+          context,
+          stroke,
+          firstPoint,
+          stroke.points.slice(1),
+        );
+      }
+    }
+
+    context.globalCompositeOperation = "source-over";
+    renderLayerThumbnail(layerId);
+  }
+
   function handleRemoteStrokeStart(payload: StrokeStartPayload) {
     if (payload.userId === userId) {
       return;
@@ -1158,15 +1254,12 @@ export default function RoomEditor({
       strokesByLayerRef.current.get(payload.layerId) ?? [];
 
     if (
-      strokes.some(
-        (stroke) => stroke.id === payload.stroke.id,
-      )
+      strokes.some((stroke) => stroke.id === payload.stroke.id)
     ) {
       return;
     }
 
     const stroke = cloneStroke(payload.stroke);
-
     strokes.push(stroke);
 
     strokesByLayerRef.current.set(payload.layerId, strokes);
@@ -1187,7 +1280,7 @@ export default function RoomEditor({
     }
 
     const canvas = getLayerCanvas(payload.layerId);
-    const context = canvas?.getContext("2d");
+    const context = canvas ? getPreviewContext(canvas) : null;
 
     if (context && firstPoint) {
       drawStrokePoint(context, stroke, firstPoint);
@@ -1207,47 +1300,40 @@ export default function RoomEditor({
     const currentStroke =
       remoteActiveStrokesRef.current.get(payload.strokeId);
 
-    if (!currentStroke) {
+    if (!currentStroke || payload.points.length === 0) {
       return;
     }
 
+    const previousPoint =
+      currentStroke.stroke.points[
+        currentStroke.stroke.points.length - 1
+      ];
+
+    currentStroke.stroke.points.push(...payload.points);
+
     const canvas = getLayerCanvas(currentStroke.layerId);
-    const context = canvas?.getContext("2d");
+    const context = canvas ? getPreviewContext(canvas) : null;
 
-    for (const point of payload.points) {
-      const previousPoint =
-        currentStroke.stroke.points[
-          currentStroke.stroke.points.length - 1
-        ];
-
-      currentStroke.stroke.points.push(point);
-
-      if (context && previousPoint) {
-        drawStrokeSegment(
-          context,
-          currentStroke.stroke,
-          previousPoint,
-          point,
-        );
-      }
-    }
-
-    const lastPoint =
-      payload.points[payload.points.length - 1];
-
-    if (lastPoint) {
-      updateRemoteCursorFromStroke(
-        payload.userId,
+    if (context && previousPoint) {
+      drawStrokePolyline(
+        context,
         currentStroke.stroke,
-        lastPoint,
+        previousPoint,
+        payload.points,
       );
-    }
-
-    if (!context) {
+    } else if (!context) {
       requestAnimationFrame(() => {
         renderLayer(currentStroke.layerId);
       });
     }
+
+    const lastPoint = payload.points[payload.points.length - 1];
+
+    updateRemoteCursorFromStroke(
+      payload.userId,
+      currentStroke.stroke,
+      lastPoint,
+    );
   }
 
   function handleRemoteStrokeEnd(payload: StrokeEndPayload) {
@@ -1256,7 +1342,6 @@ export default function RoomEditor({
     }
 
     remoteActiveStrokesRef.current.delete(payload.strokeId);
-
     renderLayerThumbnail(payload.layerId);
   }
 
@@ -1281,9 +1366,7 @@ export default function RoomEditor({
     }
 
     strokes.splice(index, 1);
-
     remoteActiveStrokesRef.current.delete(payload.strokeId);
-
     renderLayer(payload.layerId);
   }
 
@@ -1302,10 +1385,7 @@ export default function RoomEditor({
 
     strokesByLayerRef.current.set(payload.layer.id, []);
 
-    const numericName = Number.parseInt(
-      payload.layer.name,
-      10,
-    );
+    const numericName = Number.parseInt(payload.layer.name, 10);
 
     if (Number.isFinite(numericName)) {
       layerCounterRef.current = Math.max(
@@ -1333,9 +1413,7 @@ export default function RoomEditor({
       (layer) => layer.id !== payload.layerId,
     );
 
-    if (
-      remainingLayers.length === layersRef.current.length
-    ) {
+    if (remainingLayers.length === layersRef.current.length) {
       return;
     }
 
@@ -1354,7 +1432,6 @@ export default function RoomEditor({
     );
 
     commitLayers(remainingLayers);
-
     setUndoAvailable(historyRef.current.length);
 
     if (
@@ -1393,10 +1470,7 @@ export default function RoomEditor({
     }
 
     const layerMap = new Map(
-      layersRef.current.map((layer) => [
-        layer.id,
-        layer,
-      ]),
+      layersRef.current.map((layer) => [layer.id, layer]),
     );
 
     const ordered: Layer[] = [];
@@ -1413,7 +1487,6 @@ export default function RoomEditor({
     }
 
     ordered.push(...layerMap.values());
-
     commitLayers(ordered);
   }
 
@@ -1473,11 +1546,9 @@ export default function RoomEditor({
 
     strokesByLayerRef.current = nextStrokes;
     historyRef.current = [];
-
     remoteActiveStrokesRef.current.clear();
 
     setUndoAvailable(0);
-
     commitLayers(nextLayers);
 
     const numericNames = nextLayers
@@ -1489,9 +1560,7 @@ export default function RoomEditor({
         ? Math.max(...numericNames)
         : nextLayers.length;
 
-    selectLayer(
-      nextLayers[nextLayers.length - 1].id,
-    );
+    selectLayer(nextLayers[nextLayers.length - 1].id);
 
     requestAnimationFrame(() => {
       for (const layer of nextLayers) {
@@ -1511,7 +1580,6 @@ export default function RoomEditor({
     }
 
     const rect = workspace.getBoundingClientRect();
-
     const scale = zoomValue / 100;
 
     const scaledPageWidth = PAGE_WIDTH * scale;
@@ -1532,14 +1600,8 @@ export default function RoomEditor({
     );
 
     return {
-      x: Math.max(
-        -maxPanX,
-        Math.min(nextPan.x, maxPanX),
-      ),
-      y: Math.max(
-        -maxPanY,
-        Math.min(nextPan.y, maxPanY),
-      ),
+      x: Math.max(-maxPanX, Math.min(nextPan.x, maxPanX)),
+      y: Math.max(-maxPanY, Math.min(nextPan.y, maxPanY)),
     };
   }
 
@@ -1553,10 +1615,10 @@ export default function RoomEditor({
     return {
       x:
         (clientX - rect.left) *
-        (canvas.width / rect.width),
+        (PAGE_WIDTH / rect.width),
       y:
         (clientY - rect.top) *
-        (canvas.height / rect.height),
+        (PAGE_HEIGHT / rect.height),
     };
   }
 
@@ -1570,114 +1632,11 @@ export default function RoomEditor({
     );
   }
 
-  function configureContext(
-    context: CanvasRenderingContext2D,
-    stroke: Stroke,
-  ) {
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.lineWidth = stroke.size;
+  function pointDistanceSquared(first: Point, second: Point) {
+    const dx = first.x - second.x;
+    const dy = first.y - second.y;
 
-    if (stroke.tool === "brush") {
-      context.globalCompositeOperation = "source-over";
-      context.strokeStyle = stroke.color;
-      context.fillStyle = stroke.color;
-
-      return;
-    }
-
-    context.globalCompositeOperation = "destination-out";
-    context.strokeStyle = "#000000";
-    context.fillStyle = "#000000";
-  }
-
-  function drawStrokePoint(
-    context: CanvasRenderingContext2D,
-    stroke: Stroke,
-    point: Point,
-  ) {
-    configureContext(context, stroke);
-
-    context.beginPath();
-
-    context.arc(
-      point.x,
-      point.y,
-      stroke.size / 2,
-      0,
-      Math.PI * 2,
-    );
-
-    context.fill();
-  }
-
-  function drawStrokeSegment(
-    context: CanvasRenderingContext2D,
-    stroke: Stroke,
-    from: Point,
-    to: Point,
-  ) {
-    configureContext(context, stroke);
-
-    context.beginPath();
-
-    context.moveTo(from.x, from.y);
-    context.lineTo(to.x, to.y);
-
-    context.stroke();
-  }
-
-  function renderLayer(layerId: string) {
-    const canvas = getLayerCanvas(layerId);
-
-    if (!canvas) {
-      return;
-    }
-
-    const context = canvas.getContext("2d");
-
-    if (!context) {
-      return;
-    }
-
-    context.globalCompositeOperation = "source-over";
-
-    context.clearRect(
-      0,
-      0,
-      canvas.width,
-      canvas.height,
-    );
-
-    const strokes =
-      strokesByLayerRef.current.get(layerId) ?? [];
-
-    for (const stroke of strokes) {
-      const firstPoint = stroke.points[0];
-
-      if (!firstPoint) {
-        continue;
-      }
-
-      drawStrokePoint(context, stroke, firstPoint);
-
-      for (
-        let index = 1;
-        index < stroke.points.length;
-        index++
-      ) {
-        drawStrokeSegment(
-          context,
-          stroke,
-          stroke.points[index - 1],
-          stroke.points[index],
-        );
-      }
-    }
-
-    context.globalCompositeOperation = "source-over";
-
-    renderLayerThumbnail(layerId);
+    return dx * dx + dy * dy;
   }
 
   function handleUndo() {
@@ -1696,8 +1655,7 @@ export default function RoomEditor({
     }
 
     const strokeIndex = strokes.findIndex(
-      (stroke) =>
-        stroke.id === historyEntry.strokeId,
+      (stroke) => stroke.id === historyEntry.strokeId,
     );
 
     if (strokeIndex >= 0) {
@@ -1705,7 +1663,6 @@ export default function RoomEditor({
     }
 
     renderLayer(historyEntry.layerId);
-
     setUndoAvailable(historyRef.current.length);
 
     sendBroadcast("stroke-remove", {
@@ -1719,11 +1676,7 @@ export default function RoomEditor({
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
     const point = getCanvasPoint(event);
-
-    updateLocalCursor(
-      point,
-      !isDrawingRef.current,
-    );
+    updateLocalCursor(point, !isDrawingRef.current);
   }
 
   function handleCanvasPointerLeave() {
@@ -1738,7 +1691,6 @@ export default function RoomEditor({
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
     const point = getCanvasPoint(event);
-
     updateLocalCursor(point, false);
 
     if (
@@ -1750,7 +1702,7 @@ export default function RoomEditor({
     }
 
     const canvas = event.currentTarget;
-    const context = canvas.getContext("2d");
+    const context = getPreviewContext(canvas);
 
     if (!context) {
       return;
@@ -1768,11 +1720,7 @@ export default function RoomEditor({
       strokesByLayerRef.current.get(activeLayerId) ?? [];
 
     strokes.push(stroke);
-
-    strokesByLayerRef.current.set(
-      activeLayerId,
-      strokes,
-    );
+    strokesByLayerRef.current.set(activeLayerId, strokes);
 
     canvas.setPointerCapture(event.pointerId);
 
@@ -1814,15 +1762,13 @@ export default function RoomEditor({
         ? coalescedEvents
         : [nativeEvent];
 
-    const finalEvent =
-      pointerEvents[pointerEvents.length - 1];
+    const finalEvent = pointerEvents[pointerEvents.length - 1];
 
-    const finalPoint =
-      getCanvasPointFromClient(
-        canvas,
-        finalEvent.clientX,
-        finalEvent.clientY,
-      );
+    const finalPoint = getCanvasPointFromClient(
+      canvas,
+      finalEvent.clientX,
+      finalEvent.clientY,
+    );
 
     if (!isDrawingRef.current) {
       updateLocalCursor(finalPoint, true);
@@ -1831,18 +1777,27 @@ export default function RoomEditor({
 
     updateLocalCursor(finalPoint, false);
 
-    const currentStroke =
-      currentStrokeRef.current;
+    const currentStroke = currentStrokeRef.current;
 
     if (!currentStroke) {
       return;
     }
 
-    const context = canvas.getContext("2d");
+    const context = getPreviewContext(canvas);
 
     if (!context) {
       return;
     }
+
+    const startPoint = lastDrawingPointRef.current;
+
+    if (!startPoint) {
+      lastDrawingPointRef.current = finalPoint;
+      return;
+    }
+
+    const newPoints: Point[] = [];
+    let comparisonPoint = startPoint;
 
     for (const pointerEvent of pointerEvents) {
       const point = getCanvasPointFromClient(
@@ -1851,44 +1806,37 @@ export default function RoomEditor({
         pointerEvent.clientY,
       );
 
-      const previousPoint =
-        lastDrawingPointRef.current;
-
-      if (!previousPoint) {
-        lastDrawingPointRef.current = point;
-        continue;
-      }
-
-      const distanceX =
-        point.x - previousPoint.x;
-
-      const distanceY =
-        point.y - previousPoint.y;
-
       if (
-        Math.abs(distanceX) < 0.01 &&
-        Math.abs(distanceY) < 0.01
+        pointDistanceSquared(point, comparisonPoint) <
+        MIN_POINT_DISTANCE * MIN_POINT_DISTANCE
       ) {
         continue;
       }
 
-      currentStroke.stroke.points.push(point);
-
-      drawStrokeSegment(
-        context,
-        currentStroke.stroke,
-        previousPoint,
-        point,
-      );
-
-      lastDrawingPointRef.current = point;
-
-      queueStrokePointBroadcast(
-        currentStroke.layerId,
-        currentStroke.stroke.id,
-        point,
-      );
+      newPoints.push(point);
+      comparisonPoint = point;
     }
+
+    if (newPoints.length === 0) {
+      return;
+    }
+
+    currentStroke.stroke.points.push(...newPoints);
+
+    drawStrokePolyline(
+      context,
+      currentStroke.stroke,
+      startPoint,
+      newPoints,
+    );
+
+    lastDrawingPointRef.current = newPoints[newPoints.length - 1];
+
+    queueStrokePointsBroadcast(
+      currentStroke.layerId,
+      currentStroke.stroke.id,
+      newPoints,
+    );
   }
 
   function handleCanvasPointerUp(
@@ -1896,19 +1844,13 @@ export default function RoomEditor({
   ) {
     const canvas = event.currentTarget;
 
-    if (
-      canvas.hasPointerCapture(event.pointerId)
-    ) {
+    if (canvas.hasPointerCapture(event.pointerId)) {
       canvas.releasePointerCapture(event.pointerId);
     }
 
-    const currentStroke =
-      currentStrokeRef.current;
+    const currentStroke = currentStrokeRef.current;
 
-    if (
-      isDrawingRef.current &&
-      currentStroke
-    ) {
+    if (isDrawingRef.current && currentStroke) {
       flushPendingStrokePoints();
 
       historyRef.current.push({
@@ -1916,15 +1858,11 @@ export default function RoomEditor({
         strokeId: currentStroke.stroke.id,
       });
 
-      if (
-        historyRef.current.length >
-        MAX_UNDO_STEPS
-      ) {
+      if (historyRef.current.length > MAX_UNDO_STEPS) {
         historyRef.current.shift();
       }
 
       setUndoAvailable(historyRef.current.length);
-
       renderLayerThumbnail(currentStroke.layerId);
 
       sendBroadcast("stroke-end", {
@@ -1952,7 +1890,6 @@ export default function RoomEditor({
     }
 
     const point = getCanvasPoint(event);
-
     updateLocalCursor(point, true);
   }
 
@@ -1973,9 +1910,7 @@ export default function RoomEditor({
       y: event.clientY,
     };
 
-    event.currentTarget.setPointerCapture(
-      event.pointerId,
-    );
+    event.currentTarget.setPointerCapture(event.pointerId);
   }
 
   function handleWorkspacePointerMove(
@@ -2019,18 +1954,13 @@ export default function RoomEditor({
     }
 
     if (
-      event.currentTarget.hasPointerCapture(
-        event.pointerId,
-      )
+      event.currentTarget.hasPointerCapture(event.pointerId)
     ) {
-      event.currentTarget.releasePointerCapture(
-        event.pointerId,
-      );
+      event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
     isPanningRef.current = false;
     lastPanPointRef.current = null;
-
     setIsPanning(false);
   }
 
@@ -2050,9 +1980,7 @@ export default function RoomEditor({
 
     const newLayer: Layer = {
       id: layerId,
-      name: formatLayerName(
-        layerCounterRef.current,
-      ),
+      name: formatLayerName(layerCounterRef.current),
       visible: true,
       opacity: 100,
     };
@@ -2073,17 +2001,15 @@ export default function RoomEditor({
   }
 
   function toggleLayerVisibility(layerId: string) {
-    const currentLayer =
-      layersRef.current.find(
-        (layer) => layer.id === layerId,
-      );
+    const currentLayer = layersRef.current.find(
+      (layer) => layer.id === layerId,
+    );
 
     if (!currentLayer) {
       return;
     }
 
-    const visible =
-      !currentLayer.visible;
+    const visible = !currentLayer.visible;
 
     commitLayers(
       layersRef.current.map((layer) =>
@@ -2107,10 +2033,7 @@ export default function RoomEditor({
     layerId: string,
     opacity: number,
   ) {
-    const safeOpacity = Math.max(
-      0,
-      Math.min(100, opacity),
-    );
+    const safeOpacity = Math.max(0, Math.min(100, opacity));
 
     commitLayers(
       layersRef.current.map((layer) =>
@@ -2135,29 +2058,22 @@ export default function RoomEditor({
       return;
     }
 
-    const remainingLayers =
-      layersRef.current.filter(
-        (layer) => layer.id !== layerId,
-      );
+    const remainingLayers = layersRef.current.filter(
+      (layer) => layer.id !== layerId,
+    );
 
     strokesByLayerRef.current.delete(layerId);
 
-    historyRef.current =
-      historyRef.current.filter(
-        (entry) => entry.layerId !== layerId,
-      );
+    historyRef.current = historyRef.current.filter(
+      (entry) => entry.layerId !== layerId,
+    );
 
     commitLayers(remainingLayers);
-
     setUndoAvailable(historyRef.current.length);
 
-    if (
-      activeLayerIdRef.current === layerId
-    ) {
+    if (activeLayerIdRef.current === layerId) {
       selectLayer(
-        remainingLayers[
-          remainingLayers.length - 1
-        ].id,
+        remainingLayers[remainingLayers.length - 1].id,
       );
     }
 
@@ -2173,46 +2089,33 @@ export default function RoomEditor({
     targetLayerId: string,
     position: "before" | "after",
   ) {
-    const displayedLayers = [
-      ...currentLayers,
-    ].reverse();
+    const displayedLayers = [...currentLayers].reverse();
 
-    const draggedIndex =
-      displayedLayers.findIndex(
-        (layer) =>
-          layer.id === draggedLayerId,
-      );
+    const draggedIndex = displayedLayers.findIndex(
+      (layer) => layer.id === draggedLayerId,
+    );
 
     if (draggedIndex === -1) {
       return currentLayers;
     }
 
-    const [draggedLayer] =
-      displayedLayers.splice(
-        draggedIndex,
-        1,
-      );
+    const [draggedLayer] = displayedLayers.splice(
+      draggedIndex,
+      1,
+    );
 
-    const targetIndex =
-      displayedLayers.findIndex(
-        (layer) =>
-          layer.id === targetLayerId,
-      );
+    const targetIndex = displayedLayers.findIndex(
+      (layer) => layer.id === targetLayerId,
+    );
 
     if (targetIndex === -1) {
       return currentLayers;
     }
 
     const insertIndex =
-      position === "after"
-        ? targetIndex + 1
-        : targetIndex;
+      position === "after" ? targetIndex + 1 : targetIndex;
 
-    displayedLayers.splice(
-      insertIndex,
-      0,
-      draggedLayer,
-    );
+    displayedLayers.splice(insertIndex, 0, draggedLayer);
 
     return displayedLayers.reverse();
   }
@@ -2222,13 +2125,8 @@ export default function RoomEditor({
     layerId: string,
   ) {
     draggedLayerIdRef.current = layerId;
-
     event.dataTransfer.effectAllowed = "move";
-
-    event.dataTransfer.setData(
-      "text/plain",
-      layerId,
-    );
+    event.dataTransfer.setData("text/plain", layerId);
   }
 
   function handleLayerDragOver(
@@ -2237,23 +2135,17 @@ export default function RoomEditor({
   ) {
     event.preventDefault();
 
-    const draggedLayerId =
-      draggedLayerIdRef.current;
+    const draggedLayerId = draggedLayerIdRef.current;
 
-    if (
-      !draggedLayerId ||
-      draggedLayerId === layerId
-    ) {
+    if (!draggedLayerId || draggedLayerId === layerId) {
       setDragOverLayer(null);
       return;
     }
 
-    const rect =
-      event.currentTarget.getBoundingClientRect();
+    const rect = event.currentTarget.getBoundingClientRect();
 
     const position =
-      event.clientY <
-      rect.top + rect.height / 2
+      event.clientY < rect.top + rect.height / 2
         ? "before"
         : "after";
 
@@ -2271,24 +2163,18 @@ export default function RoomEditor({
   ) {
     event.preventDefault();
 
-    const draggedLayerId =
-      draggedLayerIdRef.current;
+    const draggedLayerId = draggedLayerIdRef.current;
 
-    if (
-      !draggedLayerId ||
-      draggedLayerId === targetLayerId
-    ) {
+    if (!draggedLayerId || draggedLayerId === targetLayerId) {
       draggedLayerIdRef.current = null;
       setDragOverLayer(null);
       return;
     }
 
-    const rect =
-      event.currentTarget.getBoundingClientRect();
+    const rect = event.currentTarget.getBoundingClientRect();
 
     const position: "before" | "after" =
-      event.clientY <
-      rect.top + rect.height / 2
+      event.clientY < rect.top + rect.height / 2
         ? "before"
         : "after";
 
@@ -2303,9 +2189,7 @@ export default function RoomEditor({
 
     sendBroadcast("layer-order", {
       userId,
-      layerIds: nextLayers.map(
-        (layer) => layer.id,
-      ),
+      layerIds: nextLayers.map((layer) => layer.id),
     } satisfies LayerOrderPayload);
 
     draggedLayerIdRef.current = null;
@@ -2318,57 +2202,73 @@ export default function RoomEditor({
   }
 
   function handleDownload() {
-    const exportCanvas =
-      document.createElement("canvas");
-
+    const exportCanvas = document.createElement("canvas");
     exportCanvas.width = PAGE_WIDTH;
     exportCanvas.height = PAGE_HEIGHT;
 
-    const context =
-      exportCanvas.getContext("2d");
+    const exportContext = exportCanvas.getContext("2d");
 
-    if (!context) {
+    if (!exportContext) {
       return;
     }
 
-    context.globalCompositeOperation = "source-over";
-    context.globalAlpha = 1;
+    exportContext.globalCompositeOperation = "source-over";
+    exportContext.globalAlpha = 1;
+    exportContext.fillStyle = "#ffffff";
+    exportContext.fillRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
 
-    context.fillStyle = "#ffffff";
+    const layerCanvas = document.createElement("canvas");
+    layerCanvas.width = PAGE_WIDTH;
+    layerCanvas.height = PAGE_HEIGHT;
 
-    context.fillRect(
-      0,
-      0,
-      PAGE_WIDTH,
-      PAGE_HEIGHT,
-    );
+    const layerContext = layerCanvas.getContext("2d");
 
-    for (const layer of layersRef.current) {
-      if (
-        !layer.visible ||
-        layer.opacity <= 0
-      ) {
-        continue;
-      }
-
-      const layerCanvas =
-        getLayerCanvas(layer.id);
-
-      if (!layerCanvas) {
-        continue;
-      }
-
-      context.globalAlpha =
-        layer.opacity / 100;
-
-      context.drawImage(
-        layerCanvas,
-        0,
-        0,
-      );
+    if (!layerContext) {
+      return;
     }
 
-    context.globalAlpha = 1;
+    for (const layer of layersRef.current) {
+      if (!layer.visible || layer.opacity <= 0) {
+        continue;
+      }
+
+      layerContext.globalCompositeOperation = "source-over";
+      layerContext.globalAlpha = 1;
+      layerContext.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+
+      const strokes = strokesByLayerRef.current.get(layer.id) ?? [];
+
+      for (const stroke of strokes) {
+        const firstPoint = stroke.points[0];
+
+        if (!firstPoint) {
+          continue;
+        }
+
+        drawStrokePoint(
+          layerContext,
+          stroke,
+          firstPoint,
+          1,
+        );
+
+        if (stroke.points.length > 1) {
+          drawStrokePolyline(
+            layerContext,
+            stroke,
+            firstPoint,
+            stroke.points.slice(1),
+            1,
+          );
+        }
+      }
+
+      exportContext.globalCompositeOperation = "source-over";
+      exportContext.globalAlpha = layer.opacity / 100;
+      exportContext.drawImage(layerCanvas, 0, 0);
+    }
+
+    exportContext.globalAlpha = 1;
 
     exportCanvas.toBlob(
       (blob) => {
@@ -2376,19 +2276,13 @@ export default function RoomEditor({
           return;
         }
 
-        const url =
-          URL.createObjectURL(blob);
-
-        const anchor =
-          document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
 
         anchor.href = url;
-
-        anchor.download =
-          `box-${roomCode.toLowerCase()}.png`;
+        anchor.download = `box-${roomCode.toLowerCase()}.png`;
 
         document.body.appendChild(anchor);
-
         anchor.click();
         anchor.remove();
 
@@ -2399,10 +2293,7 @@ export default function RoomEditor({
   }
 
   function getParticipantInitial(name: string) {
-    return (
-      name.trim().charAt(0).toUpperCase() ||
-      "?"
-    );
+    return name.trim().charAt(0).toUpperCase() || "?";
   }
 
   return (
@@ -2414,9 +2305,7 @@ export default function RoomEditor({
               B
             </div>
 
-            <span className="text-xl font-black">
-              box
-            </span>
+            <span className="text-xl font-black">box</span>
           </Link>
 
           <div className="hidden h-7 w-px bg-white/10 md:block" />
@@ -2456,10 +2345,7 @@ export default function RoomEditor({
             className="flex h-9 items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 text-xs font-bold text-white/60 transition hover:border-[#ff1152]/30 hover:bg-[#ff1152]/10 hover:text-white"
           >
             <Download size={16} />
-
-            <span className="hidden sm:inline">
-              Baixar
-            </span>
+            <span className="hidden sm:inline">Baixar</span>
           </button>
 
           <div className="flex items-center">
@@ -2484,9 +2370,7 @@ export default function RoomEditor({
                       className="h-full w-full object-cover"
                     />
                   ) : (
-                    getParticipantInitial(
-                      participant.name,
-                    )
+                    getParticipantInitial(participant.name)
                   )}
 
                   <div className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-[#0d0d12] bg-emerald-400" />
@@ -2554,11 +2438,7 @@ export default function RoomEditor({
             type="button"
             title="Desfazer (Ctrl+Z)"
             onClick={handleUndo}
-            disabled={
-              mounted
-                ? undoAvailable === 0
-                : false
-            }
+            disabled={mounted ? undoAvailable === 0 : false}
             className="flex h-10 w-10 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:bg-transparent"
           >
             <Undo2 size={20} />
@@ -2570,32 +2450,22 @@ export default function RoomEditor({
             <input
               type="color"
               value={color}
-              onChange={(event) =>
-                setColor(event.target.value)
-              }
+              onChange={(event) => setColor(event.target.value)}
               className="h-9 w-9 cursor-pointer rounded-lg border-0 bg-transparent"
             />
           )}
 
           <span className="text-xs font-bold text-white/40">
-            {tool === "brush"
-              ? "Pincel"
-              : "Borracha"}
+            {tool === "brush" ? "Pincel" : "Borracha"}
           </span>
 
           <input
             type="range"
             min="1"
-            max={
-              tool === "brush"
-                ? 100
-                : 200
-            }
+            max={tool === "brush" ? 100 : 200}
             value={currentSize}
             onChange={(event) =>
-              handleSizeChange(
-                Number(event.target.value),
-              )
+              handleSizeChange(Number(event.target.value))
             }
             className="w-36 accent-[#ff1152]"
           />
@@ -2646,7 +2516,9 @@ export default function RoomEditor({
             style={{
               width: PAGE_WIDTH,
               height: PAGE_HEIGHT,
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom / 100})`,
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${
+                zoom / 100
+              })`,
               transformOrigin: "center center",
             }}
           >
@@ -2654,8 +2526,8 @@ export default function RoomEditor({
               <canvas
                 key={layer.id}
                 data-layer-id={layer.id}
-                width={PAGE_WIDTH}
-                height={PAGE_HEIGHT}
+                width={PREVIEW_WIDTH}
+                height={PREVIEW_HEIGHT}
                 onPointerEnter={handleCanvasPointerEnter}
                 onPointerLeave={handleCanvasPointerLeave}
                 onPointerDown={handleCanvasPointerDown}
@@ -2693,10 +2565,7 @@ export default function RoomEditor({
             </div>
 
             {participants
-              .filter(
-                (participant) =>
-                  participant.userId !== userId,
-              )
+              .filter((participant) => participant.userId !== userId)
               .map((participant) => (
                 <div
                   key={`cursor-${participant.userId}`}
@@ -2728,17 +2597,9 @@ export default function RoomEditor({
 
           <div className="pointer-events-none absolute bottom-4 left-4 flex items-center gap-3 rounded-xl border border-white/[0.08] bg-[#0d0d12]/90 px-4 py-2 text-xs font-bold text-white/40 backdrop-blur">
             <span>Scroll: zoom</span>
-
-            <span className="text-white/15">
-              •
-            </span>
-
+            <span className="text-white/15">•</span>
             <span>Botão do meio: mover</span>
-
-            <span className="text-white/15">
-              •
-            </span>
-
+            <span className="text-white/15">•</span>
             <span>Ctrl+Z: desfazer</span>
           </div>
         </div>
@@ -2746,14 +2607,8 @@ export default function RoomEditor({
         <aside className="flex w-72 shrink-0 flex-col border-l border-white/[0.07] bg-[#0d0d12]">
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
             <div className="flex items-center gap-2">
-              <Layers
-                size={17}
-                className="text-[#ff1152]"
-              />
-
-              <span className="text-sm font-black">
-                Camadas
-              </span>
+              <Layers size={17} className="text-[#ff1152]" />
+              <span className="text-sm font-black">Camadas</span>
             </div>
 
             <button
@@ -2767,185 +2622,143 @@ export default function RoomEditor({
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
-            {[...layers]
-              .reverse()
-              .map((layer) => {
-                const isActive =
-                  layer.id === activeLayerId;
+            {[...layers].reverse().map((layer) => {
+              const isActive = layer.id === activeLayerId;
+              const isDragOver = dragOverLayer?.id === layer.id;
 
-                const isDragOver =
-                  dragOverLayer?.id === layer.id;
-
-                return (
-                  <div
-                    key={layer.id}
-                    onClick={() =>
-                      selectLayer(layer.id)
-                    }
-                    onDragOver={(event) =>
-                      handleLayerDragOver(
-                        event,
-                        layer.id,
-                      )
-                    }
-                    onDrop={(event) =>
-                      handleLayerDrop(
-                        event,
-                        layer.id,
-                      )
-                    }
-                    className={`group relative rounded-xl border p-2 transition ${
-                      isActive
-                        ? "border-[#ff1152]/40 bg-[#ff1152]/10"
-                        : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05]"
-                    } ${
-                      isDragOver &&
-                      dragOverLayer?.position === "before"
-                        ? "before:absolute before:left-0 before:right-0 before:top-[-5px] before:h-[2px] before:rounded-full before:bg-[#ff1152]"
-                        : ""
-                    } ${
-                      isDragOver &&
-                      dragOverLayer?.position === "after"
-                        ? "after:absolute after:bottom-[-5px] after:left-0 after:right-0 after:h-[2px] after:rounded-full after:bg-[#ff1152]"
-                        : ""
-                    }`}
-                  >
-                    <div className="flex cursor-pointer items-center gap-2">
-                      <div
-                        draggable
-                        title="Arrastar para reordenar"
-                        onDragStart={(event) =>
-                          handleLayerDragStart(
-                            event,
-                            layer.id,
-                          )
-                        }
-                        onDragEnd={handleLayerDragEnd}
-                        onClick={(event) =>
-                          event.stopPropagation()
-                        }
-                        className="flex h-9 w-5 shrink-0 cursor-grab items-center justify-center text-white/20 transition hover:text-white/60 active:cursor-grabbing"
-                      >
-                        <GripVertical size={16} />
-                      </div>
-
-                      <button
-                        type="button"
-                        title={
-                          layer.visible
-                            ? "Ocultar camada"
-                            : "Mostrar camada"
-                        }
-                        onClick={(event) => {
-                          event.stopPropagation();
-
-                          toggleLayerVisibility(
-                            layer.id,
-                          );
-                        }}
-                        className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white"
-                      >
-                        {layer.visible ? (
-                          <Eye size={16} />
-                        ) : (
-                          <EyeOff size={16} />
-                        )}
-                      </button>
-
-                      <div className="relative h-12 w-[68px] shrink-0 overflow-hidden rounded-lg border border-white/10 bg-white shadow-sm">
-                        <canvas
-                          data-layer-thumbnail-id={
-                            layer.id
-                          }
-                          width={THUMBNAIL_WIDTH}
-                          height={THUMBNAIL_HEIGHT}
-                          className="h-full w-full"
-                          style={{
-                            opacity:
-                              layer.opacity / 100,
-                          }}
-                        />
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <p
-                          className={`text-sm font-black ${
-                            isActive
-                              ? "text-white"
-                              : "text-white/60"
-                          }`}
-                        >
-                          {layer.name}
-                        </p>
-
-                        <p className="mt-0.5 text-[10px] font-medium text-white/20">
-                          {layer.visible
-                            ? "Visível"
-                            : "Oculta"}
-                        </p>
-                      </div>
-
-                      <button
-                        type="button"
-                        title="Excluir camada"
-                        disabled={
-                          mounted
-                            ? layers.length === 1
-                            : false
-                        }
-                        onClick={(event) => {
-                          event.stopPropagation();
-
-                          deleteLayer(layer.id);
-                        }}
-                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white/20 opacity-0 transition hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-white/20 group-hover:opacity-100"
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-
+              return (
+                <div
+                  key={layer.id}
+                  onClick={() => selectLayer(layer.id)}
+                  onDragOver={(event) =>
+                    handleLayerDragOver(event, layer.id)
+                  }
+                  onDrop={(event) =>
+                    handleLayerDrop(event, layer.id)
+                  }
+                  className={`group relative rounded-xl border p-2 transition ${
+                    isActive
+                      ? "border-[#ff1152]/40 bg-[#ff1152]/10"
+                      : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05]"
+                  } ${
+                    isDragOver && dragOverLayer?.position === "before"
+                      ? "before:absolute before:left-0 before:right-0 before:top-[-5px] before:h-[2px] before:rounded-full before:bg-[#ff1152]"
+                      : ""
+                  } ${
+                    isDragOver && dragOverLayer?.position === "after"
+                      ? "after:absolute after:bottom-[-5px] after:left-0 after:right-0 after:h-[2px] after:rounded-full after:bg-[#ff1152]"
+                      : ""
+                  }`}
+                >
+                  <div className="flex cursor-pointer items-center gap-2">
                     <div
-                      className="mt-2 flex items-center gap-2 pl-7"
-                      onClick={(event) =>
-                        event.stopPropagation()
+                      draggable
+                      title="Arrastar para reordenar"
+                      onDragStart={(event) =>
+                        handleLayerDragStart(event, layer.id)
                       }
+                      onDragEnd={handleLayerDragEnd}
+                      onClick={(event) => event.stopPropagation()}
+                      className="flex h-9 w-5 shrink-0 cursor-grab items-center justify-center text-white/20 transition hover:text-white/60 active:cursor-grabbing"
                     >
-                      <span className="w-14 shrink-0 text-[10px] font-bold text-white/30">
-                        Opacidade
-                      </span>
-
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        step="1"
-                        value={layer.opacity}
-                        onChange={(event) =>
-                          changeLayerOpacity(
-                            layer.id,
-                            Number(
-                              event.target.value,
-                            ),
-                          )
-                        }
-                        className="min-w-0 flex-1 accent-[#ff1152]"
-                      />
-
-                      <span className="w-9 shrink-0 text-right text-[10px] font-bold text-white/40">
-                        {layer.opacity}%
-                      </span>
+                      <GripVertical size={16} />
                     </div>
+
+                    <button
+                      type="button"
+                      title={
+                        layer.visible
+                          ? "Ocultar camada"
+                          : "Mostrar camada"
+                      }
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleLayerVisibility(layer.id);
+                      }}
+                      className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white"
+                    >
+                      {layer.visible ? (
+                        <Eye size={16} />
+                      ) : (
+                        <EyeOff size={16} />
+                      )}
+                    </button>
+
+                    <div className="relative h-12 w-[68px] shrink-0 overflow-hidden rounded-lg border border-white/10 bg-white shadow-sm">
+                      <canvas
+                        data-layer-thumbnail-id={layer.id}
+                        width={THUMBNAIL_WIDTH}
+                        height={THUMBNAIL_HEIGHT}
+                        className="h-full w-full"
+                        style={{
+                          opacity: layer.opacity / 100,
+                        }}
+                      />
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={`text-sm font-black ${
+                          isActive ? "text-white" : "text-white/60"
+                        }`}
+                      >
+                        {layer.name}
+                      </p>
+
+                      <p className="mt-0.5 text-[10px] font-medium text-white/20">
+                        {layer.visible ? "Visível" : "Oculta"}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      title="Excluir camada"
+                      disabled={mounted ? layers.length === 1 : false}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteLayer(layer.id);
+                      }}
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white/20 opacity-0 transition hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-white/20 group-hover:opacity-100"
+                    >
+                      <Trash2 size={15} />
+                    </button>
                   </div>
-                );
-              })}
+
+                  <div
+                    className="mt-2 flex items-center gap-2 pl-7"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <span className="w-14 shrink-0 text-[10px] font-bold text-white/30">
+                      Opacidade
+                    </span>
+
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={layer.opacity}
+                      onChange={(event) =>
+                        changeLayerOpacity(
+                          layer.id,
+                          Number(event.target.value),
+                        )
+                      }
+                      className="min-w-0 flex-1 accent-[#ff1152]"
+                    />
+
+                    <span className="w-9 shrink-0 text-right text-[10px] font-bold text-white/40">
+                      {layer.opacity}%
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="border-t border-white/[0.07] px-4 py-3">
             <p className="text-[11px] font-medium text-white/25">
-              {layers.length}{" "}
-              {layers.length === 1
-                ? "camada"
-                : "camadas"}
+              {layers.length} {layers.length === 1 ? "camada" : "camadas"}
             </p>
           </div>
         </aside>
