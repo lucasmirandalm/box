@@ -84,6 +84,26 @@ type PresencePayload = {
   presence_ref?: string;
 };
 
+type CursorState = {
+  userId: string;
+  name: string;
+  x: number;
+  y: number;
+  size: number;
+  color: string;
+  tool: Tool;
+};
+
+type LocalCursorState = CursorState & {
+  visible: boolean;
+};
+
+type CursorMovePayload = CursorState;
+
+type CursorLeavePayload = {
+  userId: string;
+};
+
 type StrokeStartPayload = {
   userId: string;
   layerId: string;
@@ -185,100 +205,102 @@ export default function RoomEditor({
   userName,
   avatarUrl,
 }: RoomEditorProps) {
-  const workspaceRef =
-    useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
 
-  const channelRef =
-    useRef<RealtimeChannel | null>(null);
+  const channelRef = useRef<RealtimeChannel | null>(null);
 
-  const realtimeConnectedRef =
-    useRef(false);
+  const realtimeConnectedRef = useRef(false);
 
-  const roomSessionIdRef =
-    useRef<string | null>(null);
+  const roomSessionIdRef = useRef<string | null>(null);
 
-  const isDrawingRef =
-    useRef(false);
+  const isDrawingRef = useRef(false);
 
-  const isPanningRef =
-    useRef(false);
+  const isPanningRef = useRef(false);
 
-  const lastDrawingPointRef =
-    useRef<Point | null>(null);
+  const lastDrawingPointRef = useRef<Point | null>(null);
 
-  const lastPanPointRef =
-    useRef<Point | null>(null);
+  const lastPanPointRef = useRef<Point | null>(null);
 
-  const currentStrokeRef =
-    useRef<CurrentStroke | null>(null);
+  const currentStrokeRef = useRef<CurrentStroke | null>(null);
 
-  const remoteActiveStrokesRef =
-    useRef<Map<string, CurrentStroke>>(
-      new Map(),
-    );
+  const remoteActiveStrokesRef = useRef<
+    Map<string, CurrentStroke>
+  >(new Map());
 
-  const strokesByLayerRef =
-    useRef<Map<string, Stroke[]>>(
-      new Map([
-        [INITIAL_LAYER_ID, []],
-      ]),
-    );
+  const strokesByLayerRef = useRef<
+    Map<string, Stroke[]>
+  >(
+    new Map([
+      [INITIAL_LAYER_ID, []],
+    ]),
+  );
 
-  const historyRef =
-    useRef<HistoryEntry[]>([]);
+  const historyRef = useRef<HistoryEntry[]>([]);
 
-  const layersRef =
-    useRef<Layer[]>(INITIAL_LAYERS);
+  const layersRef = useRef<Layer[]>(INITIAL_LAYERS);
 
-  const activeLayerIdRef =
-    useRef(INITIAL_LAYER_ID);
+  const activeLayerIdRef = useRef(INITIAL_LAYER_ID);
 
-  const layerCounterRef =
-    useRef(1);
+  const layerCounterRef = useRef(1);
 
-  const draggedLayerIdRef =
-    useRef<string | null>(null);
+  const draggedLayerIdRef = useRef<string | null>(null);
 
-  const pendingThumbnailLayersRef =
-    useRef<Set<string>>(
-      new Set(),
-    );
+  const pendingThumbnailLayersRef = useRef<Set<string>>(
+    new Set(),
+  );
 
   const thumbnailAnimationFrameRef =
     useRef<number | null>(null);
 
   const pendingStrokePointsRef =
-    useRef<PendingStrokePoints | null>(
-      null,
-    );
+    useRef<PendingStrokePoints | null>(null);
 
   const strokeBroadcastFrameRef =
     useRef<number | null>(null);
 
-  const hasReceivedSnapshotRef =
-    useRef(false);
+  const pendingCursorBroadcastRef =
+    useRef<CursorMovePayload | null>(null);
 
-  const zoomRef =
-    useRef(25);
+  const cursorBroadcastFrameRef =
+    useRef<number | null>(null);
 
-  const panRef =
-    useRef<Point>({
+  const hasReceivedSnapshotRef = useRef(false);
+
+  const zoomRef = useRef(25);
+
+  const panRef = useRef<Point>({
+    x: 0,
+    y: 0,
+  });
+
+  const [mounted, setMounted] = useState(false);
+
+  const [participants, setParticipants] = useState<
+    Participant[]
+  >([
+    {
+      userId,
+      name: userName,
+      avatarUrl,
+      onlineAt: "",
+    },
+  ]);
+
+  const [remoteCursors, setRemoteCursors] = useState<
+    Record<string, CursorState>
+  >({});
+
+  const [localCursor, setLocalCursor] =
+    useState<LocalCursorState>({
+      userId,
+      name: userName,
       x: 0,
       y: 0,
+      size: 12,
+      color: "#111111",
+      tool: "brush",
+      visible: false,
     });
-
-  const [mounted, setMounted] =
-    useState(false);
-
-  const [participants, setParticipants] =
-    useState<Participant[]>([
-      {
-        userId,
-        name: userName,
-        avatarUrl,
-        onlineAt: "",
-      },
-    ]);
 
   const [
     realtimeConnected,
@@ -286,64 +308,37 @@ export default function RoomEditor({
   ] = useState(false);
 
   const [layers, setLayers] =
-    useState<Layer[]>(
-      INITIAL_LAYERS,
-    );
+    useState<Layer[]>(INITIAL_LAYERS);
 
   const [
     activeLayerId,
     setActiveLayerId,
-  ] = useState(
-    INITIAL_LAYER_ID,
-  );
+  ] = useState(INITIAL_LAYER_ID);
 
-  const [tool, setTool] =
-    useState<Tool>("brush");
+  const [tool, setTool] = useState<Tool>("brush");
 
-  const [
-    brushSize,
-    setBrushSize,
-  ] = useState(12);
+  const [brushSize, setBrushSize] = useState(12);
 
-  const [
-    eraserSize,
-    setEraserSize,
-  ] = useState(50);
+  const [eraserSize, setEraserSize] = useState(50);
 
-  const [color, setColor] =
-    useState("#111111");
+  const [color, setColor] = useState("#111111");
 
-  const [zoom, setZoom] =
-    useState(25);
+  const [zoom, setZoom] = useState(25);
 
-  const [pan, setPan] =
-    useState<Point>({
-      x: 0,
-      y: 0,
-    });
+  const [pan, setPan] = useState<Point>({
+    x: 0,
+    y: 0,
+  });
 
-  const [
-    isPanning,
-    setIsPanning,
-  ] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
 
-  const [
-    undoAvailable,
-    setUndoAvailable,
-  ] = useState(0);
+  const [undoAvailable, setUndoAvailable] = useState(0);
 
-  const [
-    dragOverLayer,
-    setDragOverLayer,
-  ] =
-    useState<DragOverLayer | null>(
-      null,
-    );
+  const [dragOverLayer, setDragOverLayer] =
+    useState<DragOverLayer | null>(null);
 
   const userInitial =
-    userName
-      .charAt(0)
-      .toUpperCase();
+    userName.charAt(0).toUpperCase();
 
   const currentSize =
     tool === "brush"
@@ -353,8 +348,7 @@ export default function RoomEditor({
   const activeLayer =
     layers.find(
       (layer) =>
-        layer.id ===
-        activeLayerId,
+        layer.id === activeLayerId,
     ) ?? null;
 
   const participantCount =
@@ -365,8 +359,7 @@ export default function RoomEditor({
 
     return () => {
       if (
-        thumbnailAnimationFrameRef.current !==
-        null
+        thumbnailAnimationFrameRef.current !== null
       ) {
         cancelAnimationFrame(
           thumbnailAnimationFrameRef.current,
@@ -374,21 +367,49 @@ export default function RoomEditor({
       }
 
       if (
-        strokeBroadcastFrameRef.current !==
-        null
+        strokeBroadcastFrameRef.current !== null
       ) {
         cancelAnimationFrame(
           strokeBroadcastFrameRef.current,
+        );
+      }
+
+      if (
+        cursorBroadcastFrameRef.current !== null
+      ) {
+        cancelAnimationFrame(
+          cursorBroadcastFrameRef.current,
         );
       }
     };
   }, []);
 
   useEffect(() => {
+    setLocalCursor((current) => {
+      const nextCursor = {
+        ...current,
+        size: currentSize,
+        color,
+        tool,
+      };
+
+      if (current.visible) {
+        queueCursorBroadcast(nextCursor);
+      }
+
+      return nextCursor;
+    });
+  }, [
+    tool,
+    brushSize,
+    eraserSize,
+    color,
+  ]);
+
+  useEffect(() => {
     let disposed = false;
 
-    const supabase =
-      createClient();
+    const supabase = createClient();
 
     const roomSessionId =
       crypto.randomUUID();
@@ -424,8 +445,7 @@ export default function RoomEditor({
         await supabase.rpc(
           "heartbeat_room_session",
           {
-            p_room_code:
-              roomCode,
+            p_room_code: roomCode,
             p_session_id:
               roomSessionIdRef.current,
           },
@@ -444,9 +464,7 @@ export default function RoomEditor({
 
     supabase.realtime.onHeartbeat(
       (status) => {
-        if (
-          status === "ok"
-        ) {
+        if (status === "ok") {
           void heartbeatRoom();
         }
       },
@@ -472,8 +490,7 @@ export default function RoomEditor({
         )
       ) {
         for (
-          const presence of
-          presences
+          const presence of presences
         ) {
           if (
             !presence.userId ||
@@ -524,37 +541,68 @@ export default function RoomEditor({
         );
       }
 
-      const nextParticipants =
-        [
-          ...uniqueParticipants.values(),
-        ].sort(
-          (
-            first,
-            second,
-          ) => {
-            if (
-              first.userId ===
-              userId
-            ) {
-              return -1;
-            }
+      const nextParticipants = [
+        ...uniqueParticipants.values(),
+      ].sort(
+        (first, second) => {
+          if (
+            first.userId ===
+            userId
+          ) {
+            return -1;
+          }
 
-            if (
-              second.userId ===
-              userId
-            ) {
-              return 1;
-            }
+          if (
+            second.userId ===
+            userId
+          ) {
+            return 1;
+          }
 
-            return first.name.localeCompare(
-              second.name,
-              "pt-BR",
-            );
-          },
+          return first.name.localeCompare(
+            second.name,
+            "pt-BR",
+          );
+        },
+      );
+
+      const onlineIds =
+        new Set(
+          nextParticipants.map(
+            (participant) =>
+              participant.userId,
+          ),
         );
 
       setParticipants(
         nextParticipants,
+      );
+
+      setRemoteCursors(
+        (current) => {
+          const next: Record<
+            string,
+            CursorState
+          > = {};
+
+          for (
+            const [
+              id,
+              cursor,
+            ] of Object.entries(
+              current,
+            )
+          ) {
+            if (
+              onlineIds.has(id)
+            ) {
+              next[id] =
+                cursor;
+            }
+          }
+
+          return next;
+        },
       );
     }
 
@@ -579,6 +627,30 @@ export default function RoomEditor({
           event: "leave",
         },
         syncParticipants,
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "cursor-move",
+        },
+        ({ payload }) => {
+          handleRemoteCursorMove(
+            payload as CursorMovePayload,
+          );
+        },
+      )
+      .on(
+        "broadcast",
+        {
+          event:
+            "cursor-leave",
+        },
+        ({ payload }) => {
+          handleRemoteCursorLeave(
+            payload as CursorLeavePayload,
+          );
+        },
       )
       .on(
         "broadcast",
@@ -723,7 +795,7 @@ export default function RoomEditor({
           ) {
             const {
               error:
-                sessionError,
+              sessionError,
             } =
               await supabase.rpc(
                 "start_room_session",
@@ -777,11 +849,11 @@ export default function RoomEditor({
 
           if (
             status ===
-              "CHANNEL_ERROR" ||
+            "CHANNEL_ERROR" ||
             status ===
-              "TIMED_OUT" ||
+            "TIMED_OUT" ||
             status ===
-              "CLOSED"
+            "CLOSED"
           ) {
             realtimeConnectedRef.current =
               false;
@@ -808,6 +880,15 @@ export default function RoomEditor({
 
       realtimeConnectedRef.current =
         false;
+
+      void channel.send({
+        type: "broadcast",
+        event:
+          "cursor-leave",
+        payload: {
+          userId,
+        } satisfies CursorLeavePayload,
+      });
 
       if (
         channelRef.current ===
@@ -880,15 +961,15 @@ export default function RoomEditor({
       const nextZoom =
         event.deltaY < 0
           ? Math.min(
-              currentZoom +
-                ZOOM_STEP,
-              MAX_ZOOM,
-            )
+            currentZoom +
+            ZOOM_STEP,
+            MAX_ZOOM,
+          )
           : Math.max(
-              currentZoom -
-                ZOOM_STEP,
-              MIN_ZOOM,
-            );
+            currentZoom -
+            ZOOM_STEP,
+            MIN_ZOOM,
+          );
 
       if (
         nextZoom ===
@@ -922,11 +1003,11 @@ export default function RoomEditor({
             x:
               mouseX -
               pointX *
-                nextScale,
+              nextScale,
             y:
               mouseY -
               pointY *
-                nextScale,
+              nextScale,
           },
           nextZoom,
         );
@@ -937,13 +1018,9 @@ export default function RoomEditor({
       panRef.current =
         nextPan;
 
-      setZoom(
-        nextZoom,
-      );
+      setZoom(nextZoom);
 
-      setPan(
-        nextPan,
-      );
+      setPan(nextPan);
     }
 
     workspace.addEventListener(
@@ -970,11 +1047,9 @@ export default function RoomEditor({
         (event.ctrlKey ||
           event.metaKey) &&
         event.key.toLowerCase() ===
-          "z";
+        "z";
 
-      if (
-        !isUndoShortcut
-      ) {
+      if (!isUndoShortcut) {
         return;
       }
 
@@ -1017,15 +1092,139 @@ export default function RoomEditor({
     });
   }
 
+  function queueCursorBroadcast(
+    cursor: CursorState,
+  ) {
+    pendingCursorBroadcastRef.current =
+      cursor;
+
+    if (
+      cursorBroadcastFrameRef.current !==
+      null
+    ) {
+      return;
+    }
+
+    cursorBroadcastFrameRef.current =
+      requestAnimationFrame(
+        () => {
+          cursorBroadcastFrameRef.current =
+            null;
+
+          const pending =
+            pendingCursorBroadcastRef.current;
+
+          pendingCursorBroadcastRef.current =
+            null;
+
+          if (!pending) {
+            return;
+          }
+
+          sendBroadcast(
+            "cursor-move",
+            pending,
+          );
+        },
+      );
+  }
+
+  function hideLocalCursor() {
+    setLocalCursor(
+      (current) => ({
+        ...current,
+        visible: false,
+      }),
+    );
+
+    pendingCursorBroadcastRef.current =
+      null;
+
+    sendBroadcast(
+      "cursor-leave",
+      {
+        userId,
+      } satisfies CursorLeavePayload,
+    );
+  }
+
+  function updateCursorFromPointer(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) {
+    const point =
+      getCanvasPoint(event);
+
+    const cursor: LocalCursorState = {
+      userId,
+      name: userName,
+      x: point.x,
+      y: point.y,
+      size: currentSize,
+      color,
+      tool,
+      visible: true,
+    };
+
+    setLocalCursor(cursor);
+
+    queueCursorBroadcast(
+      cursor,
+    );
+
+    return point;
+  }
+
+  function handleRemoteCursorMove(
+    payload: CursorMovePayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    setRemoteCursors(
+      (current) => ({
+        ...current,
+        [payload.userId]:
+          payload,
+      }),
+    );
+  }
+
+  function handleRemoteCursorLeave(
+    payload: CursorLeavePayload,
+  ) {
+    if (
+      payload.userId ===
+      userId
+    ) {
+      return;
+    }
+
+    setRemoteCursors(
+      (current) => {
+        const next = {
+          ...current,
+        };
+
+        delete next[
+          payload.userId
+        ];
+
+        return next;
+      },
+    );
+  }
+
   function commitLayers(
     nextLayers: Layer[],
   ) {
     layersRef.current =
       nextLayers;
 
-    setLayers(
-      nextLayers,
-    );
+    setLayers(nextLayers);
   }
 
   function selectLayer(
@@ -1134,10 +1333,9 @@ export default function RoomEditor({
     thumbnailAnimationFrameRef.current =
       requestAnimationFrame(
         () => {
-          const pendingLayers =
-            [
-              ...pendingThumbnailLayersRef.current,
-            ];
+          const pendingLayers = [
+            ...pendingThumbnailLayersRef.current,
+          ];
 
           pendingThumbnailLayersRef.current.clear();
 
@@ -1192,7 +1390,7 @@ export default function RoomEditor({
     if (
       !pending ||
       pending.points.length ===
-        0
+      0
     ) {
       return;
     }
@@ -1222,18 +1420,18 @@ export default function RoomEditor({
     if (
       !pending ||
       pending.layerId !==
-        layerId ||
+      layerId ||
       pending.strokeId !==
-        strokeId
+      strokeId
     ) {
       flushPendingStrokePoints();
 
       pendingStrokePointsRef.current =
-        {
-          layerId,
-          strokeId,
-          points: [],
-        };
+      {
+        layerId,
+        strokeId,
+        points: [],
+      };
     }
 
     pendingStrokePointsRef.current?.points.push(
@@ -1359,9 +1557,7 @@ export default function RoomEditor({
         payload.stroke,
       );
 
-    strokes.push(
-      stroke,
-    );
+    strokes.push(stroke);
 
     strokesByLayerRef.current.set(
       payload.layerId,
@@ -1452,9 +1648,9 @@ export default function RoomEditor({
       const previousPoint =
         currentStroke.stroke
           .points[
-          currentStroke.stroke
-            .points.length -
-            1
+        currentStroke.stroke
+          .points.length -
+        1
         ];
 
       currentStroke.stroke.points.push(
@@ -1534,9 +1730,7 @@ export default function RoomEditor({
           payload.strokeId,
       );
 
-    if (
-      index === -1
-    ) {
+    if (index === -1) {
       return;
     }
 
@@ -1672,9 +1866,9 @@ export default function RoomEditor({
 
     if (
       activeLayerIdRef.current ===
-        payload.layerId &&
+      payload.layerId &&
       remainingLayers.length >
-        0
+      0
     ) {
       selectLayer(
         remainingLayers[
@@ -1825,9 +2019,9 @@ export default function RoomEditor({
   ) {
     if (
       payload.targetUserId !==
-        userId ||
+      userId ||
       payload.userId ===
-        userId ||
+      userId ||
       hasReceivedSnapshotRef.current
     ) {
       return;
@@ -1886,9 +2080,7 @@ export default function RoomEditor({
 
     remoteActiveStrokesRef.current.clear();
 
-    setUndoAvailable(
-      0,
-    );
+    setUndoAvailable(0);
 
     commitLayers(
       nextLayers,
@@ -1909,10 +2101,10 @@ export default function RoomEditor({
 
     layerCounterRef.current =
       numericNames.length >
-      0
+        0
         ? Math.max(
-            ...numericNames,
-          )
+          ...numericNames,
+        )
         : nextLayers.length;
 
     selectLayer(
@@ -1964,16 +2156,16 @@ export default function RoomEditor({
       Math.max(
         0,
         rect.width / 2 +
-          scaledPageWidth / 2 -
-          MIN_VISIBLE_PAGE,
+        scaledPageWidth / 2 -
+        MIN_VISIBLE_PAGE,
       );
 
     const maxPanY =
       Math.max(
         0,
         rect.height / 2 +
-          scaledPageHeight / 2 -
-          MIN_VISIBLE_PAGE,
+        scaledPageHeight / 2 -
+        MIN_VISIBLE_PAGE,
       );
 
     return {
@@ -2142,8 +2334,7 @@ export default function RoomEditor({
       ) ?? [];
 
     for (
-      const stroke of
-      strokes
+      const stroke of strokes
     ) {
       const firstPoint =
         stroke.points[0];
@@ -2168,11 +2359,9 @@ export default function RoomEditor({
           context,
           stroke,
           stroke.points[
-            index - 1
+          index - 1
           ],
-          stroke.points[
-            index
-          ],
+          stroke.points[index],
         );
       }
     }
@@ -2242,9 +2431,37 @@ export default function RoomEditor({
     );
   }
 
+  function handleCanvasPointerEnter(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) {
+    updateCursorFromPointer(
+      event,
+    );
+  }
+
+  function handleCanvasPointerLeave(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) {
+    if (
+      isDrawingRef.current
+    ) {
+      return;
+    }
+
+    hideLocalCursor();
+
+    event.currentTarget.style.cursor =
+      "none";
+  }
+
   function handleCanvasPointerDown(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    const point =
+      updateCursorFromPointer(
+        event,
+      );
+
     if (
       event.button !== 0 ||
       !activeLayer ||
@@ -2255,11 +2472,6 @@ export default function RoomEditor({
 
     const canvas =
       event.currentTarget;
-
-    const point =
-      getCanvasPoint(
-        event,
-      );
 
     const context =
       canvas.getContext(
@@ -2279,9 +2491,7 @@ export default function RoomEditor({
         tool === "brush"
           ? brushSize
           : eraserSize,
-      points: [
-        point,
-      ],
+      points: [point],
     };
 
     const strokes =
@@ -2289,9 +2499,7 @@ export default function RoomEditor({
         activeLayerId,
       ) ?? [];
 
-    strokes.push(
-      stroke,
-    );
+    strokes.push(stroke);
 
     strokesByLayerRef.current.set(
       activeLayerId,
@@ -2309,11 +2517,11 @@ export default function RoomEditor({
       point;
 
     currentStrokeRef.current =
-      {
-        layerId:
-          activeLayerId,
-        stroke,
-      };
+    {
+      layerId:
+        activeLayerId,
+      stroke,
+    };
 
     drawStrokePoint(
       context,
@@ -2342,6 +2550,11 @@ export default function RoomEditor({
   function handleCanvasPointerMove(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    const currentPoint =
+      updateCursorFromPointer(
+        event,
+      );
+
     if (
       !isDrawingRef.current
     ) {
@@ -2360,11 +2573,6 @@ export default function RoomEditor({
     ) {
       return;
     }
-
-    const currentPoint =
-      getCanvasPoint(
-        event,
-      );
 
     const context =
       event.currentTarget.getContext(
@@ -2469,6 +2677,23 @@ export default function RoomEditor({
 
     currentStrokeRef.current =
       null;
+
+    const rect =
+      canvas.getBoundingClientRect();
+
+    const pointerInside =
+      event.clientX >=
+      rect.left &&
+      event.clientX <=
+      rect.right &&
+      event.clientY >=
+      rect.top &&
+      event.clientY <=
+      rect.bottom;
+
+    if (!pointerInside) {
+      hideLocalCursor();
+    }
   }
 
   function handleWorkspacePointerDown(
@@ -2485,17 +2710,15 @@ export default function RoomEditor({
     isPanningRef.current =
       true;
 
-    setIsPanning(
-      true,
-    );
+    setIsPanning(true);
 
     lastPanPointRef.current =
-      {
-        x:
-          event.clientX,
-        y:
-          event.clientY,
-      };
+    {
+      x:
+        event.clientX,
+      y:
+        event.clientY,
+    };
 
     event.currentTarget.setPointerCapture(
       event.pointerId,
@@ -2533,17 +2756,15 @@ export default function RoomEditor({
     panRef.current =
       nextPan;
 
-    setPan(
-      nextPan,
-    );
+    setPan(nextPan);
 
     lastPanPointRef.current =
-      {
-        x:
-          event.clientX,
-        y:
-          event.clientY,
-      };
+    {
+      x:
+        event.clientX,
+      y:
+        event.clientY,
+    };
   }
 
   function handleWorkspacePointerUp(
@@ -2571,9 +2792,7 @@ export default function RoomEditor({
     lastPanPointRef.current =
       null;
 
-    setIsPanning(
-      false,
-    );
+    setIsPanning(false);
   }
 
   function handleSizeChange(
@@ -2582,16 +2801,12 @@ export default function RoomEditor({
     if (
       tool === "brush"
     ) {
-      setBrushSize(
-        value,
-      );
+      setBrushSize(value);
 
       return;
     }
 
-    setEraserSize(
-      value,
-    );
+    setEraserSize(value);
   }
 
   function addLayer() {
@@ -2621,9 +2836,7 @@ export default function RoomEditor({
       newLayer,
     ]);
 
-    selectLayer(
-      layerId,
-    );
+    selectLayer(layerId);
 
     sendBroadcast(
       "layer-add",
@@ -2656,11 +2869,11 @@ export default function RoomEditor({
       layersRef.current.map(
         (layer) =>
           layer.id ===
-          layerId
+            layerId
             ? {
-                ...layer,
-                visible,
-              }
+              ...layer,
+              visible,
+            }
             : layer,
       ),
     );
@@ -2692,12 +2905,12 @@ export default function RoomEditor({
       layersRef.current.map(
         (layer) =>
           layer.id ===
-          layerId
+            layerId
             ? {
-                ...layer,
-                opacity:
-                  safeOpacity,
-              }
+              ...layer,
+              opacity:
+                safeOpacity,
+            }
             : layer,
       ),
     );
@@ -2823,7 +3036,7 @@ export default function RoomEditor({
 
     const insertIndex =
       position ===
-      "after"
+        "after"
         ? targetIndex + 1
         : targetIndex;
 
@@ -2864,11 +3077,9 @@ export default function RoomEditor({
     if (
       !draggedLayerId ||
       draggedLayerId ===
-        layerId
+      layerId
     ) {
-      setDragOverLayer(
-        null,
-      );
+      setDragOverLayer(null);
 
       return;
     }
@@ -2878,7 +3089,7 @@ export default function RoomEditor({
 
     const position =
       event.clientY <
-      rect.top +
+        rect.top +
         rect.height / 2
         ? "before"
         : "after";
@@ -2904,14 +3115,12 @@ export default function RoomEditor({
     if (
       !draggedLayerId ||
       draggedLayerId ===
-        targetLayerId
+      targetLayerId
     ) {
       draggedLayerIdRef.current =
         null;
 
-      setDragOverLayer(
-        null,
-      );
+      setDragOverLayer(null);
 
       return;
     }
@@ -2923,7 +3132,7 @@ export default function RoomEditor({
       | "before"
       | "after" =
       event.clientY <
-      rect.top +
+        rect.top +
         rect.height / 2
         ? "before"
         : "after";
@@ -2955,18 +3164,14 @@ export default function RoomEditor({
     draggedLayerIdRef.current =
       null;
 
-    setDragOverLayer(
-      null,
-    );
+    setDragOverLayer(null);
   }
 
   function handleLayerDragEnd() {
     draggedLayerIdRef.current =
       null;
 
-    setDragOverLayer(
-      null,
-    );
+    setDragOverLayer(null);
   }
 
   function handleDownload() {
@@ -2993,8 +3198,7 @@ export default function RoomEditor({
     context.globalCompositeOperation =
       "source-over";
 
-    context.globalAlpha =
-      1;
+    context.globalAlpha = 1;
 
     context.fillStyle =
       "#ffffff";
@@ -3012,8 +3216,7 @@ export default function RoomEditor({
     ) {
       if (
         !layer.visible ||
-        layer.opacity <=
-          0
+        layer.opacity <= 0
       ) {
         continue;
       }
@@ -3028,8 +3231,7 @@ export default function RoomEditor({
       }
 
       context.globalAlpha =
-        layer.opacity /
-        100;
+        layer.opacity / 100;
 
       context.drawImage(
         layerCanvas,
@@ -3038,8 +3240,7 @@ export default function RoomEditor({
       );
     }
 
-    context.globalAlpha =
-      1;
+    context.globalAlpha = 1;
 
     exportCanvas.toBlob(
       (blob) => {
@@ -3057,8 +3258,7 @@ export default function RoomEditor({
             "a",
           );
 
-        anchor.href =
-          url;
+        anchor.href = url;
 
         anchor.download =
           `box-${roomCode.toLowerCase()}.png`;
@@ -3091,6 +3291,30 @@ export default function RoomEditor({
     );
   }
 
+  const visibleCursors: CursorState[] = [
+    ...(localCursor.visible
+      ? [
+        {
+          userId:
+            localCursor.userId,
+          name:
+            localCursor.name,
+          x: localCursor.x,
+          y: localCursor.y,
+          size:
+            localCursor.size,
+          color:
+            localCursor.color,
+          tool:
+            localCursor.tool,
+        },
+      ]
+      : []),
+    ...Object.values(
+      remoteCursors,
+    ),
+  ];
+
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-[#09090d] text-white">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#0d0d12] px-4">
@@ -3118,11 +3342,10 @@ export default function RoomEditor({
 
             <div className="mt-0.5 flex items-center gap-1.5">
               <div
-                className={`h-1.5 w-1.5 rounded-full ${
-                  realtimeConnected
+                className={`h-1.5 w-1.5 rounded-full ${realtimeConnected
                     ? "bg-emerald-400"
                     : "bg-yellow-400"
-                }`}
+                  }`}
               />
 
               <p className="text-xs font-medium text-white/30">
@@ -3136,9 +3359,7 @@ export default function RoomEditor({
 
         <div className="flex items-center gap-4">
           <div className="hidden rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/35 xl:block">
-            A4 horizontal •
-            3508 × 2480 •
-            300 DPI
+            A4 horizontal • 3508 × 2480 • 300 DPI
           </div>
 
           <button
@@ -3175,15 +3396,14 @@ export default function RoomEditor({
                     }
                     title={
                       participant.userId ===
-                      userId
+                        userId
                         ? `${participant.name} (você)`
                         : participant.name
                     }
-                    className={`relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-[#0d0d12] bg-[#ff1152] text-xs font-black ${
-                      index > 0
+                    className={`relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-[#0d0d12] bg-[#ff1152] text-xs font-black ${index > 0
                         ? "-ml-2"
                         : ""
-                    }`}
+                      }`}
                   >
                     {participant.avatarUrl ? (
                       <img
@@ -3247,12 +3467,10 @@ export default function RoomEditor({
                 "brush",
               )
             }
-            className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
-              tool ===
-              "brush"
+            className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${tool === "brush"
                 ? "bg-[#ff1152] text-white"
                 : "text-white/40 hover:bg-white/[0.06] hover:text-white"
-            }`}
+              }`}
           >
             <Brush
               size={20}
@@ -3267,12 +3485,10 @@ export default function RoomEditor({
                 "eraser",
               )
             }
-            className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
-              tool ===
-              "eraser"
+            className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${tool === "eraser"
                 ? "bg-[#ff1152] text-white"
                 : "text-white/40 hover:bg-white/[0.06] hover:text-white"
-            }`}
+              }`}
           >
             <Eraser
               size={20}
@@ -3288,7 +3504,7 @@ export default function RoomEditor({
             disabled={
               mounted
                 ? undoAvailable ===
-                  0
+                0
                 : false
             }
             className="flex h-10 w-10 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:bg-transparent"
@@ -3302,23 +3518,23 @@ export default function RoomEditor({
 
           {tool ===
             "brush" && (
-            <input
-              type="color"
-              value={color}
-              onChange={(
-                event,
-              ) =>
-                setColor(
-                  event.target.value,
-                )
-              }
-              className="h-9 w-9 cursor-pointer rounded-lg border-0 bg-transparent"
-            />
-          )}
+              <input
+                type="color"
+                value={color}
+                onChange={(
+                  event,
+                ) =>
+                  setColor(
+                    event.target.value,
+                  )
+                }
+                className="h-9 w-9 cursor-pointer rounded-lg border-0 bg-transparent"
+              />
+            )}
 
           <span className="text-xs font-bold text-white/40">
             {tool ===
-            "brush"
+              "brush"
               ? "Pincel"
               : "Borracha"}
           </span>
@@ -3327,8 +3543,7 @@ export default function RoomEditor({
             type="range"
             min="1"
             max={
-              tool ===
-              "brush"
+              tool === "brush"
                 ? 100
                 : 200
             }
@@ -3392,11 +3607,10 @@ export default function RoomEditor({
               event.preventDefault();
             }
           }}
-          className={`relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-[#19191f] ${
-            isPanning
+          className={`relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-[#19191f] ${isPanning
               ? "cursor-grabbing"
               : ""
-          }`}
+            }`}
         >
           <div
             className="pointer-events-none absolute inset-0 opacity-20"
@@ -3421,9 +3635,7 @@ export default function RoomEditor({
             }}
           >
             {layers.map(
-              (
-                layer,
-              ) => (
+              (layer) => (
                 <canvas
                   key={
                     layer.id
@@ -3437,6 +3649,12 @@ export default function RoomEditor({
                   height={
                     PAGE_HEIGHT
                   }
+                  onPointerEnter={
+                    handleCanvasPointerEnter
+                  }
+                  onPointerLeave={
+                    handleCanvasPointerLeave
+                  }
                   onPointerDown={
                     handleCanvasPointerDown
                   }
@@ -3449,19 +3667,14 @@ export default function RoomEditor({
                   onPointerCancel={
                     handleCanvasPointerUp
                   }
-                  className={`absolute inset-0 block touch-none ${
-                    layer.visible
+                  className={`absolute inset-0 block touch-none ${layer.visible
                       ? ""
                       : "invisible"
-                  } ${
-                    layer.id ===
-                    activeLayerId
-                      ? tool ===
-                        "brush"
-                        ? "cursor-crosshair"
-                        : "cursor-cell"
+                    } ${layer.id ===
+                      activeLayerId
+                      ? "cursor-none"
                       : "pointer-events-none"
-                  }`}
+                    }`}
                   style={{
                     width:
                       PAGE_WIDTH,
@@ -3472,6 +3685,45 @@ export default function RoomEditor({
                       100,
                   }}
                 />
+              ),
+            )}
+
+            {visibleCursors.map(
+              (cursor) => (
+                <div
+                  key={
+                    cursor.userId
+                  }
+                  className="pointer-events-none absolute z-50 rounded-full"
+                  style={{
+                    left:
+                      cursor.x,
+                    top:
+                      cursor.y,
+                    width:
+                      cursor.size,
+                    height:
+                      cursor.size,
+                    transform:
+                      "translate(-50%, -50%)",
+                    border: `2px solid ${cursor.color}`,
+                    boxShadow:
+                      "0 0 0 1px rgba(255,255,255,0.35)",
+                  }}
+                >
+                  <div
+                    className="absolute left-full top-full whitespace-nowrap rounded-lg border px-3 py-1.5 text-base font-black leading-none text-white shadow-lg"
+                    style={{
+                      background: "#0d0d12",
+                      transform: `scale(${50 / zoom})`,
+                      transformOrigin: "top left",
+                      marginLeft: 8 * (100 / zoom),
+                      marginTop: 8 * (100 / zoom),
+                    }}
+                  >
+                    {cursor.name}
+                  </div>
+                </div>
               ),
             )}
           </div>
@@ -3486,8 +3738,7 @@ export default function RoomEditor({
             </span>
 
             <span>
-              Botão do meio:
-              mover
+              Botão do meio: mover
             </span>
 
             <span className="text-white/15">
@@ -3495,8 +3746,7 @@ export default function RoomEditor({
             </span>
 
             <span>
-              Ctrl+Z:
-              desfazer
+              Ctrl+Z: desfazer
             </span>
           </div>
         </div>
@@ -3532,9 +3782,7 @@ export default function RoomEditor({
             {[...layers]
               .reverse()
               .map(
-                (
-                  layer,
-                ) => {
+                (layer) => {
                   const isActive =
                     layer.id ===
                     activeLayerId;
@@ -3569,23 +3817,20 @@ export default function RoomEditor({
                           layer.id,
                         )
                       }
-                      className={`group relative rounded-xl border p-2 transition ${
-                        isActive
+                      className={`group relative rounded-xl border p-2 transition ${isActive
                           ? "border-[#ff1152]/40 bg-[#ff1152]/10"
                           : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05]"
-                      } ${
-                        isDragOver &&
-                        dragOverLayer?.position ===
+                        } ${isDragOver &&
+                          dragOverLayer?.position ===
                           "before"
                           ? "before:absolute before:left-0 before:right-0 before:top-[-5px] before:h-[2px] before:rounded-full before:bg-[#ff1152]"
                           : ""
-                      } ${
-                        isDragOver &&
-                        dragOverLayer?.position ===
+                        } ${isDragOver &&
+                          dragOverLayer?.position ===
                           "after"
                           ? "after:absolute after:bottom-[-5px] after:left-0 after:right-0 after:h-[2px] after:rounded-full after:bg-[#ff1152]"
                           : ""
-                      }`}
+                        }`}
                     >
                       <div className="flex cursor-pointer items-center gap-2">
                         <div
@@ -3610,9 +3855,7 @@ export default function RoomEditor({
                           className="flex h-9 w-5 shrink-0 cursor-grab items-center justify-center text-white/20 transition hover:text-white/60 active:cursor-grabbing"
                         >
                           <GripVertical
-                            size={
-                              16
-                            }
+                            size={16}
                           />
                         </div>
 
@@ -3636,15 +3879,11 @@ export default function RoomEditor({
                         >
                           {layer.visible ? (
                             <Eye
-                              size={
-                                16
-                              }
+                              size={16}
                             />
                           ) : (
                             <EyeOff
-                              size={
-                                16
-                              }
+                              size={16}
                             />
                           )}
                         </button>
@@ -3671,11 +3910,10 @@ export default function RoomEditor({
 
                         <div className="min-w-0 flex-1">
                           <p
-                            className={`text-sm font-black ${
-                              isActive
+                            className={`text-sm font-black ${isActive
                                 ? "text-white"
                                 : "text-white/60"
-                            }`}
+                              }`}
                           >
                             {
                               layer.name
@@ -3695,7 +3933,7 @@ export default function RoomEditor({
                           disabled={
                             mounted
                               ? layers.length ===
-                                1
+                              1
                               : false
                           }
                           onClick={(
@@ -3710,9 +3948,7 @@ export default function RoomEditor({
                           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white/20 opacity-0 transition hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-white/20 group-hover:opacity-100"
                         >
                           <Trash2
-                            size={
-                              15
-                            }
+                            size={15}
                           />
                         </button>
                       </div>
@@ -3751,10 +3987,7 @@ export default function RoomEditor({
                         />
 
                         <span className="w-9 shrink-0 text-right text-[10px] font-bold text-white/40">
-                          {
-                            layer.opacity
-                          }
-                          %
+                          {layer.opacity}%
                         </span>
                       </div>
                     </div>
@@ -3767,7 +4000,7 @@ export default function RoomEditor({
             <p className="text-[11px] font-medium text-white/25">
               {layers.length}{" "}
               {layers.length ===
-              1
+                1
                 ? "camada"
                 : "camadas"}
             </p>

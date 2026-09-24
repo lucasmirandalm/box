@@ -179,7 +179,7 @@ export default async function HomePage() {
 
         <p className="mt-7 max-w-2xl text-base font-medium leading-7 text-white/50 md:text-lg">
           Crie uma sala, convide seus amigos e desenhem juntos em um mesmo
-          espaço, em tempo real.
+          espaço, em tempo real !
         </p>
 
         {user && (
@@ -219,7 +219,7 @@ export default async function HomePage() {
       </section>
 
       <footer className="relative z-10 border-t border-white/[0.06] px-6 py-8 text-center text-sm font-medium text-white/25">
-        Box — desenhe junto.
+        Box — crie com os seus amigos.
       </footer>
     </main>
   );
