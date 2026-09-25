@@ -3,6 +3,8 @@
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import {
   Brush,
+  ChevronDown,
+  ChevronUp,
   Download,
   Eraser,
   Eye,
@@ -13,6 +15,7 @@ import {
   Plus,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -37,6 +40,14 @@ type Tool = "brush" | "eraser";
 type Point = {
   x: number;
   y: number;
+  pressure?: number;
+};
+
+type TouchGestureState = {
+  startDistance: number;
+  startZoom: number;
+  anchorX: number;
+  anchorY: number;
 };
 
 type Stroke = {
@@ -59,10 +70,22 @@ type CurrentStroke = {
   stroke: Stroke;
 };
 
-type HistoryEntry = {
+type StrokeHistoryEntry = {
+  type: "stroke";
   layerId: string;
   strokeId: string;
 };
+
+type LayerDeleteHistoryEntry = {
+  type: "layer-delete";
+  layerId: string;
+  layer: Layer;
+  strokes: Stroke[];
+  index: number;
+  wasActive: boolean;
+};
+
+type HistoryEntry = StrokeHistoryEntry | LayerDeleteHistoryEntry;
 
 type DragOverLayer = {
   id: string;
@@ -135,6 +158,13 @@ type LayerDeletePayload = {
   layerId: string;
 };
 
+type LayerRestorePayload = {
+  userId: string;
+  layer: Layer;
+  strokes: Stroke[];
+  layerIds: string[];
+};
+
 type LayerUpdatePayload = {
   userId: string;
   layerId: string;
@@ -179,7 +209,7 @@ const PREVIEW_HEIGHT = Math.round(PAGE_HEIGHT * PREVIEW_SCALE);
 const THUMBNAIL_WIDTH = 140;
 const THUMBNAIL_HEIGHT = 99;
 
-const MIN_ZOOM = 25;
+const MIN_ZOOM = 10;
 const MAX_ZOOM = 150;
 const ZOOM_STEP = 10;
 
@@ -191,6 +221,7 @@ const STROKE_BROADCAST_INTERVAL_MS = 50;
 const CURSOR_BROADCAST_INTERVAL_MS = 100;
 const MIN_POINT_DISTANCE = 1.5;
 const MAX_POINTS_PER_PACKET = 48;
+const MIN_PRESSURE_SCALE = 0.18;
 
 const INITIAL_LAYER_ID = "layer-1";
 
@@ -220,6 +251,13 @@ export default function RoomEditor({
 
   const lastDrawingPointRef = useRef<Point | null>(null);
   const lastPanPointRef = useRef<Point | null>(null);
+
+  const activeTouchPointersRef = useRef<Map<number, Point>>(new Map());
+  const touchGestureRef = useRef<TouchGestureState | null>(null);
+  const touchGestureActiveRef = useRef(false);
+  const blockTouchDrawingRef = useRef(false);
+  const activePenPointerIdRef = useRef<number | null>(null);
+  const hasInitializedViewportRef = useRef(false);
 
   const currentStrokeRef = useRef<CurrentStroke | null>(null);
 
@@ -326,6 +364,9 @@ export default function RoomEditor({
   const [dragOverLayer, setDragOverLayer] =
     useState<DragOverLayer | null>(null);
 
+  const [mobileLayersOpen, setMobileLayersOpen] = useState(false);
+  const [touchInterface, setTouchInterface] = useState(false);
+
   const userInitial = userName.charAt(0).toUpperCase();
   const currentSize = tool === "brush" ? brushSize : eraserSize;
 
@@ -345,6 +386,78 @@ export default function RoomEditor({
       if (cursorBroadcastTimerRef.current !== null) {
         clearTimeout(cursorBroadcastTimerRef.current);
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+
+    if (!workspace) {
+      return;
+    }
+
+    function updateViewportForSize() {
+      const currentWorkspace = workspaceRef.current;
+
+      if (!currentWorkspace) {
+        return;
+      }
+
+      const rect = currentWorkspace.getBoundingClientRect();
+
+      if (!hasInitializedViewportRef.current) {
+        const horizontalPadding = rect.width < 768 ? 20 : 48;
+        const verticalPadding = rect.height < 600 ? 20 : 48;
+
+        const fitZoom = Math.min(
+          ((rect.width - horizontalPadding) / PAGE_WIDTH) * 100,
+          ((rect.height - verticalPadding) / PAGE_HEIGHT) * 100,
+        );
+
+        const nextZoom = Math.max(
+          MIN_ZOOM,
+          Math.min(MAX_ZOOM, fitZoom),
+        );
+
+        zoomRef.current = nextZoom;
+        panRef.current = { x: 0, y: 0 };
+        hasInitializedViewportRef.current = true;
+
+        setZoom(nextZoom);
+        setPan({ x: 0, y: 0 });
+        return;
+      }
+
+      const nextPan = clampPan(panRef.current, zoomRef.current);
+      panRef.current = nextPan;
+      setPan(nextPan);
+    }
+
+    const frame = requestAnimationFrame(updateViewportForSize);
+    const observer = new ResizeObserver(updateViewportForSize);
+
+    observer.observe(workspace);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(pointer: coarse)");
+
+    function updateTouchInterface() {
+      setTouchInterface(
+        mediaQuery.matches || navigator.maxTouchPoints > 1,
+      );
+    }
+
+    updateTouchInterface();
+    mediaQuery.addEventListener?.("change", updateTouchInterface);
+
+    return () => {
+      mediaQuery.removeEventListener?.("change", updateTouchInterface);
     };
   }, []);
 
@@ -533,6 +646,9 @@ export default function RoomEditor({
       })
       .on("broadcast", { event: "layer-delete" }, ({ payload }) => {
         handleRemoteLayerDelete(payload as LayerDeletePayload);
+      })
+      .on("broadcast", { event: "layer-restore" }, ({ payload }) => {
+        handleRemoteLayerRestore(payload as LayerRestorePayload);
       })
       .on("broadcast", { event: "layer-update" }, ({ payload }) => {
         handleRemoteLayerUpdate(payload as LayerUpdatePayload);
@@ -945,7 +1061,10 @@ export default function RoomEditor({
       name: userName,
       x: point.x,
       y: point.y,
-      size: currentSize,
+      size:
+        typeof point.pressure === "number" && point.pressure > 0
+          ? currentSize * getPointPressureScale(point)
+          : currentSize,
       color,
       tool,
     };
@@ -995,7 +1114,10 @@ export default function RoomEditor({
         "Usuário",
       x: point.x,
       y: point.y,
-      size: stroke.size,
+      size:
+        typeof point.pressure === "number"
+          ? stroke.size * getPointPressureScale(point)
+          : stroke.size,
       color: stroke.color,
       tool: stroke.tool,
     };
@@ -1136,11 +1258,9 @@ export default function RoomEditor({
   function configureContext(
     context: CanvasRenderingContext2D,
     stroke: Stroke,
-    renderScale: number,
   ) {
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.lineWidth = stroke.size * renderScale;
 
     if (stroke.tool === "brush") {
       context.globalCompositeOperation = "source-over";
@@ -1154,19 +1274,48 @@ export default function RoomEditor({
     context.fillStyle = "#000000";
   }
 
+  function getPointPressureScale(point: Point) {
+    if (typeof point.pressure !== "number") {
+      return 1;
+    }
+
+    const pressure = Math.max(0, Math.min(1, point.pressure));
+
+    return MIN_PRESSURE_SCALE +
+      (1 - MIN_PRESSURE_SCALE) * pressure;
+  }
+
+  function getStrokeWidth(
+    stroke: Stroke,
+    point: Point,
+    renderScale: number,
+  ) {
+    return (
+      stroke.size *
+      getPointPressureScale(point) *
+      renderScale
+    );
+  }
+
   function drawStrokePoint(
     context: CanvasRenderingContext2D,
     stroke: Stroke,
     point: Point,
     renderScale = PREVIEW_SCALE,
   ) {
-    configureContext(context, stroke, renderScale);
+    configureContext(context, stroke);
+
+    const width = getStrokeWidth(
+      stroke,
+      point,
+      renderScale,
+    );
 
     context.beginPath();
     context.arc(
       point.x * renderScale,
       point.y * renderScale,
-      (stroke.size * renderScale) / 2,
+      width / 2,
       0,
       Math.PI * 2,
     );
@@ -1184,22 +1333,59 @@ export default function RoomEditor({
       return;
     }
 
-    configureContext(context, stroke, renderScale);
+    configureContext(context, stroke);
 
-    context.beginPath();
-    context.moveTo(
-      from.x * renderScale,
-      from.y * renderScale,
-    );
+    const hasPressure =
+      typeof from.pressure === "number" ||
+      points.some((point) => typeof point.pressure === "number");
+
+    if (!hasPressure) {
+      context.lineWidth = stroke.size * renderScale;
+      context.beginPath();
+      context.moveTo(
+        from.x * renderScale,
+        from.y * renderScale,
+      );
+
+      for (const point of points) {
+        context.lineTo(
+          point.x * renderScale,
+          point.y * renderScale,
+        );
+      }
+
+      context.stroke();
+      return;
+    }
+
+    let previousPoint = from;
 
     for (const point of points) {
+      const previousWidth = getStrokeWidth(
+        stroke,
+        previousPoint,
+        renderScale,
+      );
+      const currentWidth = getStrokeWidth(
+        stroke,
+        point,
+        renderScale,
+      );
+
+      context.lineWidth = (previousWidth + currentWidth) / 2;
+      context.beginPath();
+      context.moveTo(
+        previousPoint.x * renderScale,
+        previousPoint.y * renderScale,
+      );
       context.lineTo(
         point.x * renderScale,
         point.y * renderScale,
       );
-    }
+      context.stroke();
 
-    context.stroke();
+      previousPoint = point;
+    }
   }
 
   function renderLayer(layerId: string) {
@@ -1444,6 +1630,61 @@ export default function RoomEditor({
     }
   }
 
+  function handleRemoteLayerRestore(payload: LayerRestorePayload) {
+    if (payload.userId === userId) {
+      return;
+    }
+
+    if (
+      layersRef.current.some(
+        (layer) => layer.id === payload.layer.id,
+      )
+    ) {
+      return;
+    }
+
+    strokesByLayerRef.current.set(
+      payload.layer.id,
+      payload.strokes.map(cloneStroke),
+    );
+
+    const numericName = Number.parseInt(payload.layer.name, 10);
+
+    if (Number.isFinite(numericName)) {
+      layerCounterRef.current = Math.max(
+        layerCounterRef.current,
+        numericName,
+      );
+    }
+
+    const layerMap = new Map<string, Layer>([
+      ...layersRef.current.map(
+        (layer) => [layer.id, layer] as const,
+      ),
+      [payload.layer.id, { ...payload.layer }] as const,
+    ]);
+
+    const orderedLayers: Layer[] = [];
+
+    for (const layerId of payload.layerIds) {
+      const layer = layerMap.get(layerId);
+
+      if (!layer) {
+        continue;
+      }
+
+      orderedLayers.push(layer);
+      layerMap.delete(layerId);
+    }
+
+    orderedLayers.push(...layerMap.values());
+    commitLayers(orderedLayers);
+
+    requestAnimationFrame(() => {
+      renderLayer(payload.layer.id);
+    });
+  }
+
   function handleRemoteLayerUpdate(payload: LayerUpdatePayload) {
     if (payload.userId === userId) {
       return;
@@ -1469,7 +1710,7 @@ export default function RoomEditor({
       return;
     }
 
-    const layerMap = new Map(
+    const layerMap = new Map<string, Layer>(
       layersRef.current.map((layer) => [layer.id, layer]),
     );
 
@@ -1605,11 +1846,20 @@ export default function RoomEditor({
     };
   }
 
+  function normalizePointerPressure(pointerEvent: PointerEvent) {
+    if (pointerEvent.pointerType !== "pen") {
+      return undefined;
+    }
+
+    return Math.max(0, Math.min(1, pointerEvent.pressure));
+  }
+
   function getCanvasPointFromClient(
     canvas: HTMLCanvasElement,
     clientX: number,
     clientY: number,
-  ) {
+    pressure?: number,
+  ): Point {
     const rect = canvas.getBoundingClientRect();
 
     return {
@@ -1619,16 +1869,28 @@ export default function RoomEditor({
       y:
         (clientY - rect.top) *
         (PAGE_HEIGHT / rect.height),
+      ...(typeof pressure === "number" ? { pressure } : {}),
     };
+  }
+
+  function getCanvasPointFromPointer(
+    canvas: HTMLCanvasElement,
+    pointerEvent: PointerEvent,
+  ) {
+    return getCanvasPointFromClient(
+      canvas,
+      pointerEvent.clientX,
+      pointerEvent.clientY,
+      normalizePointerPressure(pointerEvent),
+    );
   }
 
   function getCanvasPoint(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
-    return getCanvasPointFromClient(
+    return getCanvasPointFromPointer(
       event.currentTarget,
-      event.clientX,
-      event.clientY,
+      event.nativeEvent,
     );
   }
 
@@ -1639,10 +1901,187 @@ export default function RoomEditor({
     return dx * dx + dy * dy;
   }
 
+  function getTouchPair() {
+    return [...activeTouchPointersRef.current.values()].slice(0, 2);
+  }
+
+  function getTouchDistance(first: Point, second: Point) {
+    return Math.hypot(
+      second.x - first.x,
+      second.y - first.y,
+    );
+  }
+
+  function getTouchCentroid(first: Point, second: Point) {
+    return {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+  }
+
+  function cancelActiveStrokeForTouchGesture() {
+    const currentStroke = currentStrokeRef.current;
+
+    if (!isDrawingRef.current || !currentStroke) {
+      isDrawingRef.current = false;
+      lastDrawingPointRef.current = null;
+      currentStrokeRef.current = null;
+      return;
+    }
+
+    flushPendingStrokePoints();
+
+    const strokes =
+      strokesByLayerRef.current.get(currentStroke.layerId) ?? [];
+
+    const strokeIndex = strokes.findIndex(
+      (stroke) => stroke.id === currentStroke.stroke.id,
+    );
+
+    if (strokeIndex >= 0) {
+      strokes.splice(strokeIndex, 1);
+    }
+
+    sendBroadcast("stroke-remove", {
+      userId,
+      layerId: currentStroke.layerId,
+      strokeId: currentStroke.stroke.id,
+    } satisfies StrokeRemovePayload);
+
+    isDrawingRef.current = false;
+    lastDrawingPointRef.current = null;
+    currentStrokeRef.current = null;
+
+    renderLayer(currentStroke.layerId);
+  }
+
+  function beginTouchGesture() {
+    const workspace = workspaceRef.current;
+    const points = getTouchPair();
+
+    if (!workspace || points.length < 2) {
+      return;
+    }
+
+    const [first, second] = points;
+    const distance = getTouchDistance(first, second);
+
+    if (distance <= 0) {
+      return;
+    }
+
+    const centroid = getTouchCentroid(first, second);
+    const rect = workspace.getBoundingClientRect();
+    const relativeX = centroid.x - (rect.left + rect.width / 2);
+    const relativeY = centroid.y - (rect.top + rect.height / 2);
+    const scale = zoomRef.current / 100;
+
+    touchGestureRef.current = {
+      startDistance: distance,
+      startZoom: zoomRef.current,
+      anchorX: (relativeX - panRef.current.x) / scale,
+      anchorY: (relativeY - panRef.current.y) / scale,
+    };
+
+    touchGestureActiveRef.current = true;
+    blockTouchDrawingRef.current = true;
+    hideLocalCursor();
+  }
+
+  function updateTouchGesture() {
+    const workspace = workspaceRef.current;
+    const gesture = touchGestureRef.current;
+    const points = getTouchPair();
+
+    if (!workspace || !gesture || points.length < 2) {
+      return;
+    }
+
+    const [first, second] = points;
+    const distance = getTouchDistance(first, second);
+
+    if (distance <= 0) {
+      return;
+    }
+
+    const zoomRatio = distance / gesture.startDistance;
+    const nextZoom = Math.max(
+      MIN_ZOOM,
+      Math.min(MAX_ZOOM, gesture.startZoom * zoomRatio),
+    );
+
+    const centroid = getTouchCentroid(first, second);
+    const rect = workspace.getBoundingClientRect();
+    const relativeX = centroid.x - (rect.left + rect.width / 2);
+    const relativeY = centroid.y - (rect.top + rect.height / 2);
+    const nextScale = nextZoom / 100;
+
+    const nextPan = clampPan(
+      {
+        x: relativeX - gesture.anchorX * nextScale,
+        y: relativeY - gesture.anchorY * nextScale,
+      },
+      nextZoom,
+    );
+
+    zoomRef.current = nextZoom;
+    panRef.current = nextPan;
+
+    setZoom(nextZoom);
+    setPan(nextPan);
+  }
+
   function handleUndo() {
     const historyEntry = historyRef.current.pop();
 
     if (!historyEntry) {
+      return;
+    }
+
+    if (historyEntry.type === "layer-delete") {
+      if (
+        layersRef.current.some(
+          (layer) => layer.id === historyEntry.layerId,
+        )
+      ) {
+        setUndoAvailable(historyRef.current.length);
+        return;
+      }
+
+      const restoredLayer = { ...historyEntry.layer };
+      const restoredStrokes = historyEntry.strokes.map(cloneStroke);
+      const restoredLayers = [...layersRef.current];
+      const safeIndex = Math.max(
+        0,
+        Math.min(historyEntry.index, restoredLayers.length),
+      );
+
+      restoredLayers.splice(safeIndex, 0, restoredLayer);
+
+      strokesByLayerRef.current.set(
+        restoredLayer.id,
+        restoredStrokes,
+      );
+
+      commitLayers(restoredLayers);
+
+      if (historyEntry.wasActive) {
+        selectLayer(restoredLayer.id);
+      }
+
+      setUndoAvailable(historyRef.current.length);
+
+      requestAnimationFrame(() => {
+        renderLayer(restoredLayer.id);
+      });
+
+      sendBroadcast("layer-restore", {
+        userId,
+        layer: restoredLayer,
+        strokes: restoredStrokes.map(cloneStroke),
+        layerIds: restoredLayers.map((layer) => layer.id),
+      } satisfies LayerRestorePayload);
+
       return;
     }
 
@@ -1675,12 +2114,18 @@ export default function RoomEditor({
   function handleCanvasPointerEnter(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    if (event.pointerType === "touch") {
+      return;
+    }
+
     const point = getCanvasPoint(event);
     updateLocalCursor(point, !isDrawingRef.current);
   }
 
-  function handleCanvasPointerLeave() {
-    if (isDrawingRef.current) {
+  function handleCanvasPointerLeave(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) {
+    if (event.pointerType === "touch" || isDrawingRef.current) {
       return;
     }
 
@@ -1690,8 +2135,26 @@ export default function RoomEditor({
   function handleCanvasPointerDown(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+
+      if (activePenPointerIdRef.current !== null) {
+        return;
+      }
+
+      if (
+        blockTouchDrawingRef.current ||
+        activeTouchPointersRef.current.size >= 1
+      ) {
+        return;
+      }
+    }
+
     const point = getCanvasPoint(event);
-    updateLocalCursor(point, false);
+
+    if (event.pointerType !== "touch") {
+      updateLocalCursor(point, false);
+    }
 
     if (
       event.button !== 0 ||
@@ -1706,6 +2169,10 @@ export default function RoomEditor({
 
     if (!context) {
       return;
+    }
+
+    if (event.pointerType === "pen") {
+      activePenPointerIdRef.current = event.pointerId;
     }
 
     const stroke: Stroke = {
@@ -1751,6 +2218,16 @@ export default function RoomEditor({
   function handleCanvasPointerMove(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    if (event.pointerType === "touch") {
+      if (
+        activePenPointerIdRef.current !== null ||
+        touchGestureActiveRef.current ||
+        blockTouchDrawingRef.current
+      ) {
+        return;
+      }
+    }
+
     const canvas = event.currentTarget;
     const nativeEvent = event.nativeEvent;
 
@@ -1763,19 +2240,22 @@ export default function RoomEditor({
         : [nativeEvent];
 
     const finalEvent = pointerEvents[pointerEvents.length - 1];
-
-    const finalPoint = getCanvasPointFromClient(
+    const finalPoint = getCanvasPointFromPointer(
       canvas,
-      finalEvent.clientX,
-      finalEvent.clientY,
+      finalEvent,
     );
 
     if (!isDrawingRef.current) {
-      updateLocalCursor(finalPoint, true);
+      if (event.pointerType !== "touch") {
+        updateLocalCursor(finalPoint, true);
+      }
+
       return;
     }
 
-    updateLocalCursor(finalPoint, false);
+    if (event.pointerType !== "touch") {
+      updateLocalCursor(finalPoint, false);
+    }
 
     const currentStroke = currentStrokeRef.current;
 
@@ -1800,10 +2280,9 @@ export default function RoomEditor({
     let comparisonPoint = startPoint;
 
     for (const pointerEvent of pointerEvents) {
-      const point = getCanvasPointFromClient(
+      const point = getCanvasPointFromPointer(
         canvas,
-        pointerEvent.clientX,
-        pointerEvent.clientY,
+        pointerEvent,
       );
 
       if (
@@ -1848,12 +2327,20 @@ export default function RoomEditor({
       canvas.releasePointerCapture(event.pointerId);
     }
 
+    if (
+      event.pointerType === "touch" &&
+      (touchGestureActiveRef.current || blockTouchDrawingRef.current)
+    ) {
+      return;
+    }
+
     const currentStroke = currentStrokeRef.current;
 
     if (isDrawingRef.current && currentStroke) {
       flushPendingStrokePoints();
 
       historyRef.current.push({
+        type: "stroke",
         layerId: currentStroke.layerId,
         strokeId: currentStroke.stroke.id,
       });
@@ -1876,6 +2363,15 @@ export default function RoomEditor({
     lastDrawingPointRef.current = null;
     currentStrokeRef.current = null;
 
+    if (event.pointerType === "pen") {
+      activePenPointerIdRef.current = null;
+    }
+
+    if (event.pointerType === "touch") {
+      hideLocalCursor();
+      return;
+    }
+
     const rect = canvas.getBoundingClientRect();
 
     const pointerInside =
@@ -1896,6 +2392,29 @@ export default function RoomEditor({
   function handleWorkspacePointerDown(
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+
+      if (activePenPointerIdRef.current !== null) {
+        return;
+      }
+
+      activeTouchPointersRef.current.set(event.pointerId, {
+        x: event.clientX,
+        y: event.clientY,
+      });
+
+      if (activeTouchPointersRef.current.size >= 2) {
+        cancelActiveStrokeForTouchGesture();
+
+        if (!touchGestureActiveRef.current) {
+          beginTouchGesture();
+        }
+      }
+
+      return;
+    }
+
     if (event.button !== 1) {
       return;
     }
@@ -1916,6 +2435,28 @@ export default function RoomEditor({
   function handleWorkspacePointerMove(
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    if (event.pointerType === "touch") {
+      if (activePenPointerIdRef.current !== null) {
+        return;
+      }
+
+      if (activeTouchPointersRef.current.has(event.pointerId)) {
+        activeTouchPointersRef.current.set(event.pointerId, {
+          x: event.clientX,
+          y: event.clientY,
+        });
+      }
+
+      if (
+        touchGestureActiveRef.current &&
+        activeTouchPointersRef.current.size >= 2
+      ) {
+        updateTouchGesture();
+      }
+
+      return;
+    }
+
     if (!isPanningRef.current) {
       return;
     }
@@ -1949,13 +2490,26 @@ export default function RoomEditor({
   function handleWorkspacePointerUp(
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
+    if (event.pointerType === "touch") {
+      activeTouchPointersRef.current.delete(event.pointerId);
+
+      if (activeTouchPointersRef.current.size < 2) {
+        touchGestureActiveRef.current = false;
+        touchGestureRef.current = null;
+      }
+
+      if (activeTouchPointersRef.current.size === 0) {
+        blockTouchDrawingRef.current = false;
+      }
+
+      return;
+    }
+
     if (!isPanningRef.current) {
       return;
     }
 
-    if (
-      event.currentTarget.hasPointerCapture(event.pointerId)
-    ) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
@@ -2058,23 +2612,55 @@ export default function RoomEditor({
       return;
     }
 
+    const layerIndex = layersRef.current.findIndex(
+      (layer) => layer.id === layerId,
+    );
+
+    if (layerIndex === -1) {
+      return;
+    }
+
+    const deletedLayer = layersRef.current[layerIndex];
+    const deletedStrokes =
+      strokesByLayerRef.current.get(layerId) ?? [];
+
+    historyRef.current.push({
+      type: "layer-delete",
+      layerId,
+      layer: { ...deletedLayer },
+      strokes: deletedStrokes.map(cloneStroke),
+      index: layerIndex,
+      wasActive: activeLayerIdRef.current === layerId,
+    });
+
+    if (historyRef.current.length > MAX_UNDO_STEPS) {
+      historyRef.current.shift();
+    }
+
     const remainingLayers = layersRef.current.filter(
       (layer) => layer.id !== layerId,
     );
 
     strokesByLayerRef.current.delete(layerId);
 
-    historyRef.current = historyRef.current.filter(
-      (entry) => entry.layerId !== layerId,
+    remoteActiveStrokesRef.current.forEach(
+      (currentStroke, strokeId) => {
+        if (currentStroke.layerId === layerId) {
+          remoteActiveStrokesRef.current.delete(strokeId);
+        }
+      },
     );
 
     commitLayers(remainingLayers);
     setUndoAvailable(historyRef.current.length);
 
     if (activeLayerIdRef.current === layerId) {
-      selectLayer(
-        remainingLayers[remainingLayers.length - 1].id,
+      const nextActiveIndex = Math.min(
+        layerIndex,
+        remainingLayers.length - 1,
       );
+
+      selectLayer(remainingLayers[nextActiveIndex].id);
     }
 
     sendBroadcast("layer-delete", {
@@ -2118,6 +2704,42 @@ export default function RoomEditor({
     displayedLayers.splice(insertIndex, 0, draggedLayer);
 
     return displayedLayers.reverse();
+  }
+
+  function moveLayer(
+    layerId: string,
+    direction: "up" | "down",
+  ) {
+    const currentLayers = [...layersRef.current];
+    const currentIndex = currentLayers.findIndex(
+      (layer) => layer.id === layerId,
+    );
+
+    if (currentIndex === -1) {
+      return;
+    }
+
+    const targetIndex =
+      direction === "up"
+        ? currentIndex + 1
+        : currentIndex - 1;
+
+    if (
+      targetIndex < 0 ||
+      targetIndex >= currentLayers.length
+    ) {
+      return;
+    }
+
+    const [movedLayer] = currentLayers.splice(currentIndex, 1);
+    currentLayers.splice(targetIndex, 0, movedLayer);
+
+    commitLayers(currentLayers);
+
+    sendBroadcast("layer-order", {
+      userId,
+      layerIds: currentLayers.map((layer) => layer.id),
+    } satisfies LayerOrderPayload);
   }
 
   function handleLayerDragStart(
@@ -2296,16 +2918,181 @@ export default function RoomEditor({
     return name.trim().charAt(0).toUpperCase() || "?";
   }
 
+  function renderLayerItems(mobile = false) {
+    return [...layers].reverse().map((layer) => {
+      const isActive = layer.id === activeLayerId;
+      const isDragOver = dragOverLayer?.id === layer.id;
+      const layerIndex = layers.findIndex(
+        (currentLayer) => currentLayer.id === layer.id,
+      );
+
+      return (
+        <div
+          key={layer.id}
+          onClick={() => selectLayer(layer.id)}
+          onDragOver={
+            mobile
+              ? undefined
+              : (event) => handleLayerDragOver(event, layer.id)
+          }
+          onDrop={
+            mobile
+              ? undefined
+              : (event) => handleLayerDrop(event, layer.id)
+          }
+          className={`group relative rounded-xl border p-2 transition ${
+            isActive
+              ? "border-[#ff1152]/40 bg-[#ff1152]/10"
+              : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05]"
+          } ${
+            !mobile && isDragOver && dragOverLayer?.position === "before"
+              ? "before:absolute before:left-0 before:right-0 before:top-[-5px] before:h-[2px] before:rounded-full before:bg-[#ff1152]"
+              : ""
+          } ${
+            !mobile && isDragOver && dragOverLayer?.position === "after"
+              ? "after:absolute after:bottom-[-5px] after:left-0 after:right-0 after:h-[2px] after:rounded-full after:bg-[#ff1152]"
+              : ""
+          }`}
+        >
+          <div className="flex cursor-pointer items-center gap-2">
+            {mobile ? (
+              <div
+                className="flex shrink-0 flex-col gap-1"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  title="Mover camada para cima"
+                  disabled={layerIndex === layers.length - 1}
+                  onClick={() => moveLayer(layer.id, "up")}
+                  className="flex h-7 w-8 items-center justify-center rounded-md text-white/40 hover:bg-white/[0.07] hover:text-white disabled:opacity-20"
+                >
+                  <ChevronUp size={16} />
+                </button>
+                <button
+                  type="button"
+                  title="Mover camada para baixo"
+                  disabled={layerIndex === 0}
+                  onClick={() => moveLayer(layer.id, "down")}
+                  className="flex h-7 w-8 items-center justify-center rounded-md text-white/40 hover:bg-white/[0.07] hover:text-white disabled:opacity-20"
+                >
+                  <ChevronDown size={16} />
+                </button>
+              </div>
+            ) : (
+              <div
+                draggable
+                title="Arrastar para reordenar"
+                onDragStart={(event) =>
+                  handleLayerDragStart(event, layer.id)
+                }
+                onDragEnd={handleLayerDragEnd}
+                onClick={(event) => event.stopPropagation()}
+                className="flex h-9 w-5 shrink-0 cursor-grab items-center justify-center text-white/20 transition hover:text-white/60 active:cursor-grabbing"
+              >
+                <GripVertical size={16} />
+              </div>
+            )}
+
+            <button
+              type="button"
+              title={layer.visible ? "Ocultar camada" : "Mostrar camada"}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleLayerVisibility(layer.id);
+              }}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white"
+            >
+              {layer.visible ? <Eye size={17} /> : <EyeOff size={17} />}
+            </button>
+
+            <div
+              className={`relative shrink-0 overflow-hidden rounded-lg border border-white/10 bg-white shadow-sm ${
+                mobile ? "h-14 w-20" : "h-12 w-[68px]"
+              }`}
+            >
+              <canvas
+                data-layer-thumbnail-id={layer.id}
+                width={THUMBNAIL_WIDTH}
+                height={THUMBNAIL_HEIGHT}
+                className="h-full w-full"
+                style={{
+                  opacity: layer.opacity / 100,
+                }}
+              />
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <p
+                className={`${mobile ? "text-base" : "text-sm"} font-black ${
+                  isActive ? "text-white" : "text-white/60"
+                }`}
+              >
+                {layer.name}
+              </p>
+
+              <p className="mt-0.5 text-[11px] font-medium text-white/25">
+                {layer.visible ? "Visível" : "Oculta"}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              title="Excluir camada"
+              disabled={mounted ? layers.length === 1 : false}
+              onClick={(event) => {
+                event.stopPropagation();
+                deleteLayer(layer.id);
+              }}
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white/25 transition hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-20 ${
+                mobile ? "" : "opacity-0 group-hover:opacity-100"
+              }`}
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+
+          <div
+            className={`mt-2 flex items-center gap-2 ${mobile ? "pl-1" : "pl-7"}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <span className="w-16 shrink-0 text-[11px] font-bold text-white/30">
+              Opacidade
+            </span>
+
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={layer.opacity}
+              onChange={(event) =>
+                changeLayerOpacity(
+                  layer.id,
+                  Number(event.target.value),
+                )
+              }
+              className="min-w-0 flex-1 accent-[#ff1152]"
+            />
+
+            <span className="w-10 shrink-0 text-right text-[11px] font-bold text-white/40">
+              {layer.opacity}%
+            </span>
+          </div>
+        </div>
+      );
+    });
+  }
+
   return (
-    <main className="flex h-screen flex-col overflow-hidden bg-[#09090d] text-white">
-      <header className="flex h-16 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#0d0d12] px-4">
-        <div className="flex items-center gap-5">
-          <Link href="/" className="flex items-center gap-2">
+    <main className="relative flex h-[100dvh] flex-col overflow-hidden overscroll-none bg-[#09090d] text-white">
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#0d0d12] px-3 md:h-16 md:px-4">
+        <div className="flex min-w-0 items-center gap-3 md:gap-5">
+          <Link href="/" className="flex shrink-0 items-center gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#ff1152] font-black">
               B
             </div>
-
-            <span className="text-xl font-black">box</span>
+            <span className="hidden text-xl font-black sm:inline">box</span>
           </Link>
 
           <div className="hidden h-7 w-px bg-white/10 md:block" />
@@ -2331,9 +3118,20 @@ export default function RoomEditor({
               </p>
             </div>
           </div>
+
+          <div className="min-w-0 md:hidden">
+            <p className="truncate text-xs font-black text-white/80">
+              {roomCode.toUpperCase()}
+            </p>
+            <p className="text-[10px] font-bold text-white/30">
+              {realtimeConnected
+                ? `${participantCount} online`
+                : "Conectando..."}
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex shrink-0 items-center gap-2 md:gap-4">
           <div className="hidden rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/35 xl:block">
             A4 horizontal • 3508 × 2480 • 300 DPI
           </div>
@@ -2342,13 +3140,13 @@ export default function RoomEditor({
             type="button"
             title="Baixar desenho em PNG"
             onClick={handleDownload}
-            className="flex h-9 items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 text-xs font-bold text-white/60 transition hover:border-[#ff1152]/30 hover:bg-[#ff1152]/10 hover:text-white"
+            className="flex h-9 items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.04] px-2.5 text-xs font-bold text-white/60 transition hover:border-[#ff1152]/30 hover:bg-[#ff1152]/10 hover:text-white md:px-3"
           >
             <Download size={16} />
             <span className="hidden sm:inline">Baixar</span>
           </button>
 
-          <div className="flex items-center">
+          <div className="hidden items-center sm:flex">
             {participants
               .slice(0, MAX_PARTICIPANTS)
               .map((participant, index) => (
@@ -2378,7 +3176,7 @@ export default function RoomEditor({
               ))}
           </div>
 
-          <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-1.5 pr-3">
+          <div className="hidden items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-1.5 pr-3 md:flex">
             {avatarUrl ? (
               <img
                 src={avatarUrl}
@@ -2391,7 +3189,7 @@ export default function RoomEditor({
               </div>
             )}
 
-            <span className="hidden text-sm font-bold text-white/70 sm:block">
+            <span className="hidden text-sm font-bold text-white/70 lg:block">
               {userName}
             </span>
           </div>
@@ -2406,7 +3204,11 @@ export default function RoomEditor({
         </div>
       </header>
 
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#101015] px-4">
+      <div
+        className={`${
+          touchInterface ? "hidden" : "flex"
+        } h-14 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#101015] px-4`}
+      >
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -2481,7 +3283,7 @@ export default function RoomEditor({
           </div>
 
           <div className="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/50">
-            {zoom}%
+            {Math.round(zoom)}%
           </div>
         </div>
       </div>
@@ -2501,6 +3303,10 @@ export default function RoomEditor({
           className={`relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-[#19191f] ${
             isPanning ? "cursor-grabbing" : ""
           }`}
+          style={{
+            touchAction: "none",
+            overscrollBehavior: "none",
+          }}
         >
           <div
             className="pointer-events-none absolute inset-0 opacity-20"
@@ -2516,9 +3322,7 @@ export default function RoomEditor({
             style={{
               width: PAGE_WIDTH,
               height: PAGE_HEIGHT,
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${
-                zoom / 100
-              })`,
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom / 100})`,
               transformOrigin: "center center",
             }}
           >
@@ -2545,6 +3349,7 @@ export default function RoomEditor({
                   width: PAGE_WIDTH,
                   height: PAGE_HEIGHT,
                   opacity: layer.opacity / 100,
+                  touchAction: "none",
                 }}
               />
             ))}
@@ -2595,16 +3400,40 @@ export default function RoomEditor({
               ))}
           </div>
 
-          <div className="pointer-events-none absolute bottom-4 left-4 flex items-center gap-3 rounded-xl border border-white/[0.08] bg-[#0d0d12]/90 px-4 py-2 text-xs font-bold text-white/40 backdrop-blur">
+          <div
+            className={`${
+              touchInterface ? "block" : "hidden"
+            } pointer-events-none absolute left-3 top-3 rounded-xl border border-white/[0.08] bg-[#0d0d12]/85 px-3 py-2 text-[11px] font-bold text-white/45 backdrop-blur`}
+          >
+            1 dedo: desenhar • 2 dedos: mover/zoom
+          </div>
+
+          <div
+            className={`${
+              touchInterface ? "hidden" : "flex"
+            } pointer-events-none absolute bottom-4 left-4 items-center gap-3 rounded-xl border border-white/[0.08] bg-[#0d0d12]/90 px-4 py-2 text-xs font-bold text-white/40 backdrop-blur`}
+          >
             <span>Scroll: zoom</span>
             <span className="text-white/15">•</span>
             <span>Botão do meio: mover</span>
             <span className="text-white/15">•</span>
             <span>Ctrl+Z: desfazer</span>
           </div>
+
+          <div
+            className={`${
+              touchInterface ? "block" : "hidden"
+            } pointer-events-none absolute right-3 top-3 rounded-xl border border-white/[0.08] bg-[#0d0d12]/85 px-3 py-2 text-[11px] font-black text-white/45 backdrop-blur`}
+          >
+            {Math.round(zoom)}%
+          </div>
         </div>
 
-        <aside className="flex w-72 shrink-0 flex-col border-l border-white/[0.07] bg-[#0d0d12]">
+        <aside
+          className={`${
+            touchInterface ? "hidden" : "flex"
+          } w-72 shrink-0 flex-col border-l border-white/[0.07] bg-[#0d0d12]`}
+        >
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
             <div className="flex items-center gap-2">
               <Layers size={17} className="text-[#ff1152]" />
@@ -2622,138 +3451,7 @@ export default function RoomEditor({
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
-            {[...layers].reverse().map((layer) => {
-              const isActive = layer.id === activeLayerId;
-              const isDragOver = dragOverLayer?.id === layer.id;
-
-              return (
-                <div
-                  key={layer.id}
-                  onClick={() => selectLayer(layer.id)}
-                  onDragOver={(event) =>
-                    handleLayerDragOver(event, layer.id)
-                  }
-                  onDrop={(event) =>
-                    handleLayerDrop(event, layer.id)
-                  }
-                  className={`group relative rounded-xl border p-2 transition ${
-                    isActive
-                      ? "border-[#ff1152]/40 bg-[#ff1152]/10"
-                      : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05]"
-                  } ${
-                    isDragOver && dragOverLayer?.position === "before"
-                      ? "before:absolute before:left-0 before:right-0 before:top-[-5px] before:h-[2px] before:rounded-full before:bg-[#ff1152]"
-                      : ""
-                  } ${
-                    isDragOver && dragOverLayer?.position === "after"
-                      ? "after:absolute after:bottom-[-5px] after:left-0 after:right-0 after:h-[2px] after:rounded-full after:bg-[#ff1152]"
-                      : ""
-                  }`}
-                >
-                  <div className="flex cursor-pointer items-center gap-2">
-                    <div
-                      draggable
-                      title="Arrastar para reordenar"
-                      onDragStart={(event) =>
-                        handleLayerDragStart(event, layer.id)
-                      }
-                      onDragEnd={handleLayerDragEnd}
-                      onClick={(event) => event.stopPropagation()}
-                      className="flex h-9 w-5 shrink-0 cursor-grab items-center justify-center text-white/20 transition hover:text-white/60 active:cursor-grabbing"
-                    >
-                      <GripVertical size={16} />
-                    </div>
-
-                    <button
-                      type="button"
-                      title={
-                        layer.visible
-                          ? "Ocultar camada"
-                          : "Mostrar camada"
-                      }
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleLayerVisibility(layer.id);
-                      }}
-                      className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white"
-                    >
-                      {layer.visible ? (
-                        <Eye size={16} />
-                      ) : (
-                        <EyeOff size={16} />
-                      )}
-                    </button>
-
-                    <div className="relative h-12 w-[68px] shrink-0 overflow-hidden rounded-lg border border-white/10 bg-white shadow-sm">
-                      <canvas
-                        data-layer-thumbnail-id={layer.id}
-                        width={THUMBNAIL_WIDTH}
-                        height={THUMBNAIL_HEIGHT}
-                        className="h-full w-full"
-                        style={{
-                          opacity: layer.opacity / 100,
-                        }}
-                      />
-                    </div>
-
-                    <div className="min-w-0 flex-1">
-                      <p
-                        className={`text-sm font-black ${
-                          isActive ? "text-white" : "text-white/60"
-                        }`}
-                      >
-                        {layer.name}
-                      </p>
-
-                      <p className="mt-0.5 text-[10px] font-medium text-white/20">
-                        {layer.visible ? "Visível" : "Oculta"}
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      title="Excluir camada"
-                      disabled={mounted ? layers.length === 1 : false}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        deleteLayer(layer.id);
-                      }}
-                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white/20 opacity-0 transition hover:bg-red-500/10 hover:text-red-400 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-white/20 group-hover:opacity-100"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-
-                  <div
-                    className="mt-2 flex items-center gap-2 pl-7"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <span className="w-14 shrink-0 text-[10px] font-bold text-white/30">
-                      Opacidade
-                    </span>
-
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={layer.opacity}
-                      onChange={(event) =>
-                        changeLayerOpacity(
-                          layer.id,
-                          Number(event.target.value),
-                        )
-                      }
-                      className="min-w-0 flex-1 accent-[#ff1152]"
-                    />
-
-                    <span className="w-9 shrink-0 text-right text-[10px] font-bold text-white/40">
-                      {layer.opacity}%
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+            {renderLayerItems(false)}
           </div>
 
           <div className="border-t border-white/[0.07] px-4 py-3">
@@ -2763,6 +3461,150 @@ export default function RoomEditor({
           </div>
         </aside>
       </div>
+
+      <div
+        className={`${
+          touchInterface ? "block" : "hidden"
+        } shrink-0 border-t border-white/[0.08] bg-[#0d0d12] pb-[env(safe-area-inset-bottom)]`}
+      >
+        <div className="flex items-center gap-2 px-3 pt-2">
+          <button
+            type="button"
+            aria-label="Pincel"
+            onClick={() => setTool("brush")}
+            className={`flex h-11 flex-1 items-center justify-center rounded-xl transition ${
+              tool === "brush"
+                ? "bg-[#ff1152] text-white"
+                : "bg-white/[0.04] text-white/45"
+            }`}
+          >
+            <Brush size={21} />
+          </button>
+
+          <button
+            type="button"
+            aria-label="Borracha"
+            onClick={() => setTool("eraser")}
+            className={`flex h-11 flex-1 items-center justify-center rounded-xl transition ${
+              tool === "eraser"
+                ? "bg-[#ff1152] text-white"
+                : "bg-white/[0.04] text-white/45"
+            }`}
+          >
+            <Eraser size={21} />
+          </button>
+
+          <button
+            type="button"
+            aria-label="Desfazer"
+            onClick={handleUndo}
+            disabled={mounted ? undoAvailable === 0 : false}
+            className="flex h-11 flex-1 items-center justify-center rounded-xl bg-white/[0.04] text-white/45 disabled:opacity-20"
+          >
+            <Undo2 size={21} />
+          </button>
+
+          {tool === "brush" && (
+            <label className="relative flex h-11 flex-1 items-center justify-center rounded-xl bg-white/[0.04]">
+              <span
+                className="h-6 w-6 rounded-full border-2 border-white/70"
+                style={{ background: color }}
+              />
+              <input
+                type="color"
+                value={color}
+                onChange={(event) => setColor(event.target.value)}
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                aria-label="Cor do pincel"
+              />
+            </label>
+          )}
+
+          <button
+            type="button"
+            aria-label="Camadas"
+            onClick={() => setMobileLayersOpen(true)}
+            className="relative flex h-11 flex-1 items-center justify-center rounded-xl bg-white/[0.04] text-white/55"
+          >
+            <Layers size={21} />
+            <span className="absolute right-1.5 top-1 rounded-full bg-[#ff1152] px-1.5 text-[9px] font-black text-white">
+              {layers.length}
+            </span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 px-3 py-2">
+          <span className="w-14 shrink-0 text-xs font-black text-white/50">
+            {tool === "brush" ? "Pincel" : "Borracha"}
+          </span>
+
+          <input
+            type="range"
+            min="1"
+            max={tool === "brush" ? 100 : 200}
+            value={currentSize}
+            onChange={(event) =>
+              handleSizeChange(Number(event.target.value))
+            }
+            className="min-w-0 flex-1 accent-[#ff1152]"
+          />
+
+          <span className="w-12 shrink-0 text-right text-xs font-black text-white/60">
+            {currentSize}px
+          </span>
+        </div>
+      </div>
+
+      {touchInterface && mobileLayersOpen && (
+        <div className="absolute inset-0 z-[100]">
+          <button
+            type="button"
+            aria-label="Fechar camadas"
+            onClick={() => setMobileLayersOpen(false)}
+            className="absolute inset-0 bg-black/65 backdrop-blur-sm"
+          />
+
+          <section className="absolute inset-x-0 bottom-0 flex max-h-[75dvh] flex-col rounded-t-3xl border-t border-white/10 bg-[#0d0d12] pb-[env(safe-area-inset-bottom)] shadow-[0_-20px_80px_rgba(0,0,0,0.5)]">
+            <div className="mx-auto mt-2 h-1.5 w-12 rounded-full bg-white/15" />
+
+            <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Layers size={18} className="text-[#ff1152]" />
+                  <span className="text-base font-black">Camadas</span>
+                </div>
+                <p className="mt-0.5 text-[10px] font-bold text-white/30">
+                  {layers.length} {layers.length === 1 ? "camada" : "camadas"}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  title="Adicionar camada"
+                  onClick={addLayer}
+                  className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#ff1152]/10 text-[#ff1152]"
+                >
+                  <Plus size={20} />
+                </button>
+
+                <button
+                  type="button"
+                  title="Fechar"
+                  onClick={() => setMobileLayersOpen(false)}
+                  className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.05] text-white/50"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-3">
+              {renderLayerItems(true)}
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
