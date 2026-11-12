@@ -27,6 +27,7 @@ import {
 } from "react";
 
 import { createClient } from "@/lib/supabase/client";
+import ColorWheel from "./color-wheel";
 
 type RoomEditorProps = {
   roomCode: string;
@@ -365,6 +366,8 @@ export default function RoomEditor({
     useState<DragOverLayer | null>(null);
 
   const [mobileLayersOpen, setMobileLayersOpen] = useState(false);
+  const [colorPanelOpen, setColorPanelOpen] = useState(true);
+  const [mobileColorOpen, setMobileColorOpen] = useState(false);
   const [touchInterface, setTouchInterface] = useState(false);
 
   const userInitial = userName.charAt(0).toUpperCase();
@@ -824,6 +827,12 @@ export default function RoomEditor({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      // Preserve normal text editing inside the hexadecimal input.
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input[type="text"], textarea'))) {
+        return;
+      }
+
       const isUndoShortcut =
         (event.ctrlKey || event.metaKey) &&
         event.key.toLowerCase() === "z";
@@ -842,6 +851,17 @@ export default function RoomEditor({
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
+
+  useEffect(() => {
+    if (!mobileColorOpen) return;
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setMobileColorOpen(false);
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileColorOpen]);
 
   function sendBroadcast(event: string, payload: object) {
     const channel = channelRef.current;
@@ -3249,12 +3269,21 @@ export default function RoomEditor({
           <div className="mx-2 h-7 w-px bg-white/10" />
 
           {tool === "brush" && (
-            <input
-              type="color"
-              value={color}
-              onChange={(event) => setColor(event.target.value)}
-              className="h-9 w-9 cursor-pointer rounded-lg border-0 bg-transparent"
-            />
+            <button
+              type="button"
+              title="Mostrar ou recolher roda de cores"
+              aria-label="Roda de cores"
+              aria-expanded={colorPanelOpen}
+              aria-controls="desktop-color-panel"
+              onClick={() => setColorPanelOpen((open) => !open)}
+              className={`flex h-10 w-10 items-center justify-center rounded-xl border transition ${
+                colorPanelOpen
+                  ? "border-[#ff1152]/50 bg-[#ff1152]/10"
+                  : "border-white/10 bg-white/[0.04] hover:bg-white/[0.08]"
+              }`}
+            >
+              <span className="h-6 w-6 rounded-full border-2 border-white/70" style={{ backgroundColor: color }} />
+            </button>
           )}
 
           <span className="text-xs font-bold text-white/40">
@@ -3434,6 +3463,25 @@ export default function RoomEditor({
             touchInterface ? "hidden" : "flex"
           } w-72 shrink-0 flex-col border-l border-white/[0.07] bg-[#0d0d12]`}
         >
+          <div className="flex max-h-[58%] shrink-0 flex-col border-b border-white/[0.07]">
+            <button
+              type="button"
+              aria-expanded={colorPanelOpen}
+              aria-controls="desktop-color-panel"
+              onClick={() => setColorPanelOpen((open) => !open)}
+              className="flex h-12 shrink-0 items-center justify-between px-4 text-sm font-black transition hover:bg-white/[0.04]"
+            >
+              <span className="flex items-center gap-2">
+                <span className="h-4 w-4 rounded-full border border-white/30" style={{ backgroundColor: color }} />
+                Cor do pincel
+              </span>
+              {colorPanelOpen ? <ChevronUp size={16} className="text-white/40" /> : <ChevronDown size={16} className="text-white/40" />}
+            </button>
+            <div id="desktop-color-panel" className={colorPanelOpen ? "min-h-0 overflow-y-auto overscroll-contain px-4 pb-4 pt-1" : "hidden"}>
+              {!touchInterface && <ColorWheel color={color} onChange={setColor} />}
+            </div>
+          </div>
+
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
             <div className="flex items-center gap-2">
               <Layers size={17} className="text-[#ff1152]" />
@@ -3505,25 +3553,31 @@ export default function RoomEditor({
           </button>
 
           {tool === "brush" && (
-            <label className="relative flex h-11 flex-1 items-center justify-center rounded-xl bg-white/[0.04]">
+            <button
+              type="button"
+              aria-label="Abrir roda de cores"
+              aria-haspopup="dialog"
+              aria-expanded={mobileColorOpen}
+              onClick={() => {
+                setMobileLayersOpen(false);
+                setMobileColorOpen(true);
+              }}
+              className="flex h-11 flex-1 items-center justify-center rounded-xl bg-white/[0.04]"
+            >
               <span
                 className="h-6 w-6 rounded-full border-2 border-white/70"
-                style={{ background: color }}
+                style={{ backgroundColor: color }}
               />
-              <input
-                type="color"
-                value={color}
-                onChange={(event) => setColor(event.target.value)}
-                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                aria-label="Cor do pincel"
-              />
-            </label>
+            </button>
           )}
 
           <button
             type="button"
             aria-label="Camadas"
-            onClick={() => setMobileLayersOpen(true)}
+            onClick={() => {
+              setMobileColorOpen(false);
+              setMobileLayersOpen(true);
+            }}
             className="relative flex h-11 flex-1 items-center justify-center rounded-xl bg-white/[0.04] text-white/55"
           >
             <Layers size={21} />
@@ -3554,6 +3608,45 @@ export default function RoomEditor({
           </span>
         </div>
       </div>
+
+      {touchInterface && mobileColorOpen && (
+        <div className="absolute inset-0 z-[100]">
+          <button
+            type="button"
+            aria-label="Fechar roda de cores"
+            onClick={() => setMobileColorOpen(false)}
+            className="absolute inset-0 bg-black/65 backdrop-blur-sm"
+          />
+          <section
+            role="dialog"
+            aria-label="Cor do pincel"
+            className="absolute inset-x-0 bottom-0 mx-auto flex max-h-[85dvh] w-full max-w-md flex-col rounded-t-3xl border-t border-white/10 bg-[#0d0d12] pb-[env(safe-area-inset-bottom)] shadow-[0_-20px_80px_rgba(0,0,0,0.5)]"
+          >
+            <div className="mx-auto mt-2 h-1.5 w-12 shrink-0 rounded-full bg-white/15" />
+            <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
+              <span className="text-base font-black">Cor do pincel</span>
+              <button
+                type="button"
+                aria-label="Fechar"
+                onClick={() => setMobileColorOpen(false)}
+                className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.05] text-white/60"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="min-h-0 overflow-y-auto overscroll-contain px-5 py-5">
+              <ColorWheel color={color} onChange={setColor} />
+              <button
+                type="button"
+                onClick={() => setMobileColorOpen(false)}
+                className="mx-auto mt-5 block w-full max-w-[224px] rounded-xl bg-[#ff1152] px-4 py-3 text-sm font-black text-white transition hover:brightness-110"
+              >
+                Concluir
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {touchInterface && mobileLayersOpen && (
         <div className="absolute inset-0 z-[100]">
