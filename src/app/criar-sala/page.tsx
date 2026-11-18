@@ -7,6 +7,7 @@ import {
 
 import { createClient } from "@/lib/supabase/server";
 import { createRoom } from "@/lib/rooms/actions";
+import { requireAccountRole } from "@/lib/account/server";
 
 type CreateRoomPageProps = {
   searchParams: Promise<{
@@ -27,6 +28,11 @@ export default async function CreateRoomPage({
 
   if (!user) {
     redirect("/entrar");
+  }
+
+  const role = await requireAccountRole(supabase, user.id);
+  if (role !== "teacher") {
+    redirect(`/entrar-na-sala?error=${encodeURIComponent("Somente professores podem criar aulas.")}`);
   }
 
   const userName =
@@ -60,12 +66,12 @@ export default async function CreateRoomPage({
             </div>
 
             <h1 className="text-3xl font-black">
-              Criar sala
+              Criar aula
             </h1>
 
             <p className="mt-2 text-sm font-medium leading-6 text-white/40">
-              Crie uma sala e convide seus amigos
-              para desenhar com você em tempo real.
+              Crie uma aula, compartilhe o código com seus alunos e
+              acompanhe os desenhos em tempo real.
             </p>
           </div>
 
@@ -84,7 +90,7 @@ export default async function CreateRoomPage({
 
             <div>
               <p className="text-xs font-medium text-white/30">
-                Criando sala como
+                Professor responsável
               </p>
 
               <p className="text-sm font-bold">
@@ -108,7 +114,7 @@ export default async function CreateRoomPage({
                 htmlFor="name"
                 className="mb-2 block text-sm font-bold text-white/70"
               >
-                Nome da sala
+                Tema da aula
               </label>
 
               <input
@@ -118,15 +124,14 @@ export default async function CreateRoomPage({
                 maxLength={60}
                 required
                 autoFocus
-                placeholder="Ex: Desenhando com amigos"
+                placeholder="Ex: Perspectiva de um ponto de fuga"
                 className="h-12 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 text-sm font-medium text-white outline-none transition placeholder:text-white/20 focus:border-[#ff1152]/60 focus:ring-2 focus:ring-[#ff1152]/10"
               />
             </div>
 
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.025] px-4 py-3">
               <p className="text-xs font-medium text-white/35">
-                A sala terá um código único e poderá
-                receber até 5 participantes.
+                A aula terá um código único e poderá receber até 5 participantes, incluindo você.
               </p>
             </div>
 
@@ -134,7 +139,7 @@ export default async function CreateRoomPage({
               type="submit"
               className="flex h-12 w-full items-center justify-center rounded-xl bg-[#ff1152] text-sm font-black transition hover:bg-[#ff2e65] active:scale-[0.99]"
             >
-              Criar sala
+              Criar aula
             </button>
           </form>
         </div>

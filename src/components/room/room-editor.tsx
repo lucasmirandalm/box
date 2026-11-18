@@ -5,6 +5,10 @@ import {
   Brush,
   ChevronDown,
   ChevronUp,
+  Copy,
+  Check,
+  GraduationCap,
+  Presentation,
   Download,
   Eraser,
   Eye,
@@ -28,9 +32,14 @@ import {
 
 import { createClient } from "@/lib/supabase/client";
 import ColorWheel from "./color-wheel";
+import { accountRoleLabel, parseClassroomRoles, type AccountRole } from "@/lib/account/roles";
 
 type RoomEditorProps = {
   roomCode: string;
+  roomName: string;
+  teacherId: string | null;
+  accountRole: AccountRole;
+  initialParticipantRoles: Record<string, AccountRole>;
   userId: string;
   userName: string;
   avatarUrl: string | null;
@@ -237,11 +246,34 @@ const INITIAL_LAYERS: Layer[] = [
 
 export default function RoomEditor({
   roomCode,
+  roomName,
+  teacherId,
+  accountRole,
+  initialParticipantRoles,
   userId,
   userName,
   avatarUrl,
 }: RoomEditorProps) {
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const isClassTeacher = accountRole === "teacher" && teacherId === userId;
+  const [participantRoles, setParticipantRoles] = useState(initialParticipantRoles);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+
+  async function copyClassCode() {
+    try {
+      await navigator.clipboard.writeText(roomCode.toUpperCase());
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("error");
+    }
+  }
+
+  function participantLabel(participant: Participant) {
+    if (participant.userId === teacherId) return `${participant.name} · Professor responsável`;
+    if (participant.userId === userId) return `${participant.name} · ${accountRoleLabel(accountRole)}`;
+    const role = participantRoles[participant.userId];
+    return role ? `${participant.name} · ${accountRoleLabel(role)}` : participant.name;
+  }
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const realtimeConnectedRef = useRef(false);
@@ -549,6 +581,15 @@ export default function RoomEditor({
       }
     });
 
+    let roleRequest = 0;
+    async function refreshParticipantRoles() {
+      const request = ++roleRequest;
+      const { data, error } = await supabase.rpc("box_classroom_roles", { p_room_code: roomCode });
+      if (!disposed && request === roleRequest && !error) {
+        setParticipantRoles(parseClassroomRoles(data));
+      }
+    }
+
     function syncParticipants() {
       const presenceState = channel.presenceState() as Record<
         string,
@@ -620,6 +661,7 @@ export default function RoomEditor({
       }
 
       setParticipants(nextParticipants);
+      void refreshParticipantRoles();
     }
 
     channel
@@ -3117,9 +3159,9 @@ export default function RoomEditor({
 
           <div className="hidden h-7 w-px bg-white/10 md:block" />
 
-          <div className="hidden md:block">
-            <p className="text-sm font-bold">
-              Sala {roomCode.toUpperCase()}
+          <div className="hidden min-w-0 md:block">
+            <p className="max-w-56 truncate text-sm font-bold" title={roomName}>
+              {roomName}
             </p>
 
             <div className="mt-0.5 flex items-center gap-1.5">
@@ -3141,7 +3183,7 @@ export default function RoomEditor({
 
           <div className="min-w-0 md:hidden">
             <p className="truncate text-xs font-black text-white/80">
-              {roomCode.toUpperCase()}
+              {roomName}
             </p>
             <p className="text-[10px] font-bold text-white/30">
               {realtimeConnected
@@ -3152,6 +3194,22 @@ export default function RoomEditor({
         </div>
 
         <div className="flex shrink-0 items-center gap-2 md:gap-4">
+          {isClassTeacher && (
+            <button
+              type="button"
+              title={copyStatus === "error" ? "Não foi possível copiar. Use o código exibido." : "Copiar código da aula"}
+              onClick={copyClassCode}
+              className="flex h-9 items-center gap-1.5 rounded-xl border border-[#ff1152]/30 bg-[#ff1152]/10 px-2 text-xs font-bold text-[#ff1152] hover:bg-[#ff1152]/20"
+            >
+              {copyStatus === "copied" ? <Check size={15} /> : <Copy size={15} />}
+              <span className="font-mono">{roomCode.toUpperCase()}</span>
+              <span className="sr-only" aria-live="polite">{copyStatus === "copied" ? "Código copiado" : copyStatus === "error" ? "Não foi possível copiar o código" : "Copiar código da aula"}</span>
+            </button>
+          )}
+          <span title={isClassTeacher ? "Professor responsável" : accountRoleLabel(accountRole)} className="flex h-8 items-center gap-1.5 rounded-lg bg-white/[0.05] px-2 text-xs font-bold text-white/70">
+            {accountRole === "teacher" ? <Presentation size={15} className="text-[#ff1152]" /> : <GraduationCap size={15} className="text-[#ff1152]" />}
+            <span className="hidden sm:inline">{accountRoleLabel(accountRole)}</span>
+          </span>
           <div className="hidden rounded-xl border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs font-bold text-white/35 xl:block">
             A4 horizontal • 3508 × 2480 • 300 DPI
           </div>
@@ -3173,13 +3231,11 @@ export default function RoomEditor({
                 <div
                   key={participant.userId}
                   title={
-                    participant.userId === userId
-                      ? `${participant.name} (você)`
-                      : participant.name
+                    `${participantLabel(participant)}${participant.userId === userId ? " (você)" : ""}`
                   }
                   className={`relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-[#0d0d12] bg-[#ff1152] text-xs font-black ${
                     index > 0 ? "-ml-2" : ""
-                  }`}
+                  } ${participant.userId === teacherId ? "ring-2 ring-[#ff1152]" : ""}`}
                 >
                   {participant.avatarUrl ? (
                     <img
@@ -3216,7 +3272,7 @@ export default function RoomEditor({
 
           <Link
             href="/"
-            title="Sair da sala"
+            title="Sair da aula"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-white/40 transition hover:bg-red-500/10 hover:text-red-400"
           >
             <LogOut size={18} />
@@ -3394,7 +3450,7 @@ export default function RoomEditor({
                 ref={localCursorLabelRef}
                 className="absolute left-full top-full whitespace-nowrap rounded-lg border bg-[#0d0d12] px-3 py-1.5 text-base font-black leading-none text-white shadow-lg"
               >
-                {userName}
+                {userName} · {accountRoleLabel(accountRole)}
               </div>
             </div>
 
@@ -3423,7 +3479,7 @@ export default function RoomEditor({
                     }
                     className="absolute left-full top-full whitespace-nowrap rounded-lg border bg-[#0d0d12] px-3 py-1.5 text-base font-black leading-none text-white shadow-lg"
                   >
-                    {participant.name}
+                    {participantLabel(participant)}
                   </div>
                 </div>
               ))}

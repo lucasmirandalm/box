@@ -1,13 +1,22 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { logout } from "@/lib/auth/actions";
+import { requireAccountRole } from "@/lib/account/server";
+import { accountRoleLabel } from "@/lib/account/roles";
+import { GraduationCap, Presentation, Pencil, Users } from "lucide-react";
 
-export default async function HomePage() {
+export default async function HomePage({ searchParams }: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
   const supabase = await createClient();
 
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  const role = user ? await requireAccountRole(supabase, user.id) : null;
+  const isTeacher = role === "teacher";
 
   const userName =
     user?.user_metadata?.name ??
@@ -54,6 +63,7 @@ export default async function HomePage() {
               <span className="max-w-36 truncate text-sm font-bold text-white/90">
                 {userName}
               </span>
+              {role && <span className="hidden rounded-lg bg-[#ff1152]/10 px-2 py-1 text-xs font-bold text-[#ff1152] sm:inline">{accountRoleLabel(role)}</span>}
 
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -80,6 +90,7 @@ export default async function HomePage() {
                 <p className="mt-0.5 truncate text-xs font-medium text-white/30">
                   {user.email}
                 </p>
+                {role && <p className="mt-2 text-xs font-bold text-[#ff1152]">{accountRoleLabel(role)}</p>}
               </div>
 
               <div className="pt-2">
@@ -162,54 +173,70 @@ export default async function HomePage() {
       </header>
 
       <section className="relative z-10 mx-auto flex max-w-6xl flex-col items-center px-6 pb-20 pt-24 text-center md:pt-32">
-        <div className="mb-6 rounded-full border border-[#ff1152]/20 bg-[#ff1152]/10 px-4 py-2 text-sm font-bold text-[#ff1152]">
-          Desenhe em tempo real com seus amigos
+        <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[#ff1152]/20 bg-[#ff1152]/10 px-4 py-2 text-sm font-bold text-[#ff1152]">
+          {role ? (isTeacher ? <Presentation size={17} /> : <GraduationCap size={17} />) : <Pencil size={17} />}
+          {role ? `Painel do ${isTeacher ? "professor" : "aluno"}` : "Ensino de desenho digital"}
         </div>
 
         <h1 className="max-w-4xl text-5xl font-black leading-[1.05] tracking-tight md:text-7xl">
-          Uma tela.
+          {role ? (isTeacher ? "Ensine desenho." : "Aprenda desenho.") : "Desenho se aprende"}
           <br />
-          Muitas ideias.
-          <br />
-
           <span className="text-[#ff1152]">
-            Juntos.
+            {role ? (isTeacher ? "Oriente em tempo real." : "Pratique em conjunto.") : "em colaboração."}
           </span>
         </h1>
 
         <p className="mt-7 max-w-2xl text-base font-medium leading-7 text-white/50 md:text-lg">
-          Crie uma sala, convide seus amigos e desenhem juntos em um mesmo
-          espaço, em tempo real !
+          {role
+            ? isTeacher
+              ? "Crie uma aula, compartilhe o código com seus alunos e demonstre técnicas no quadro de desenho compartilhado."
+              : "Entre em uma aula com o código do professor, acompanhe demonstrações e pratique desenho em um quadro compartilhado."
+            : "Um ambiente de apoio ao ensino e à aprendizagem de desenho digital, com interação entre professores e alunos em tempo real."}
         </p>
 
-        {user && (
-          <div className="mt-10 flex w-full max-w-xl flex-col gap-3 sm:flex-row">
-            <Link
-              href="/criar-sala"
-              className="flex w-full items-center justify-center rounded-2xl bg-[#ff1152] px-8 py-4 text-base font-extrabold text-white shadow-[0_10px_40px_rgba(255,17,82,0.25)] transition hover:-translate-y-0.5 hover:bg-[#ff2c64] active:translate-y-0"
-            >
-              Criar sala
-            </Link>
+        {error && <p role="alert" className="mt-6 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</p>}
 
-            <Link
-              href="/entrar-na-sala"
-              className="flex w-full items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] px-8 py-4 text-base font-extrabold text-white/80 transition hover:border-white/20 hover:bg-white/[0.07] hover:text-white"
-            >
-              Entrar em uma sala
+        {user && (
+          <div className="mt-10 grid w-full max-w-2xl gap-3 sm:grid-cols-2">
+            {isTeacher && (
+              <Link href="/criar-sala" className="group flex flex-col items-start gap-3 rounded-2xl bg-[#ff1152] p-5 text-left text-white shadow-[0_10px_40px_rgba(255,17,82,0.25)] transition hover:-translate-y-0.5 hover:bg-[#ff2c64]">
+                <Presentation size={26} />
+                <span className="text-lg font-extrabold">Criar aula</span>
+                <span className="text-sm text-white/80">Abra uma sessão e convide seus alunos.</span>
+              </Link>
+            )}
+            <Link href="/entrar-na-sala" className={`group flex flex-col items-start gap-3 rounded-2xl border p-5 text-left transition hover:-translate-y-0.5 ${isTeacher ? "border-white/10 bg-white/[0.04] hover:bg-white/[0.07]" : "border-[#ff1152]/30 bg-[#ff1152]/10 hover:bg-[#ff1152]/20 sm:col-span-2"}`}>
+              <GraduationCap size={26} className="text-[#ff1152]" />
+              <span className="text-lg font-extrabold">Entrar em uma aula</span>
+              <span className="text-sm text-white/50">Use o código compartilhado pelo professor responsável.</span>
             </Link>
           </div>
         )}
 
-        <div className="mt-6 flex items-center gap-2 text-sm font-medium text-white/30">
-          <span className="h-2 w-2 rounded-full bg-[#ff1152]" />
-          Salas com até 5 pessoas
+        <div className="mt-6 flex items-center gap-2 text-sm font-medium text-white/40">
+          <Users size={16} className="text-[#ff1152]" />
+          Aulas com até 5 participantes
         </div>
+
+        {!user && (
+          <div className="mt-12 grid w-full max-w-3xl gap-3 text-left sm:grid-cols-2">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+              <Presentation size={24} className="mb-3 text-[#ff1152]" />
+              <h2 className="font-extrabold">Para professores</h2>
+              <p className="mt-2 text-sm leading-6 text-white/50">Crie aulas e oriente seus alunos desenhando junto com eles.</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+              <GraduationCap size={24} className="mb-3 text-[#ff1152]" />
+              <h2 className="font-extrabold">Para alunos</h2>
+              <p className="mt-2 text-sm leading-6 text-white/50">Acompanhe explicações, pratique técnicas e receba orientações no quadro compartilhado.</p>
+            </div>
+          </div>
+        )}
 
         <div className="mt-20 w-full max-w-5xl overflow-hidden rounded-[28px] border border-white/10 bg-[#101016] shadow-2xl shadow-black/50">
           <video
             className="aspect-video w-full object-cover"
             src="/videos/demo.mp4"
-            poster="/images/demo-cover.webp"
             autoPlay
             loop
             muted
@@ -219,7 +246,7 @@ export default async function HomePage() {
       </section>
 
       <footer className="relative z-10 border-t border-white/[0.06] px-6 py-8 text-center text-sm font-medium text-white/25">
-        Box — crie com os seus amigos.
+        Box — ambiente colaborativo de apoio ao ensino de desenho digital.
       </footer>
     </main>
   );

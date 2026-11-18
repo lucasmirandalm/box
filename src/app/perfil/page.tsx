@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountRole } from "@/lib/account/server";
+import { accountRoleLabel } from "@/lib/account/roles";
 import {
   updateEmail,
   updatePassword,
@@ -28,6 +30,8 @@ export default async function ProfilePage({
   if (!user) {
     redirect("/entrar");
   }
+
+  const role = await requireAccountRole(supabase, user.id);
 
   const userName =
     user.user_metadata?.name ??
@@ -121,7 +125,7 @@ export default async function ProfilePage({
             </p>
 
             <p className="mt-2 text-xs font-bold text-[#ff1152]">
-              Membro do Box
+              {accountRoleLabel(role)} · Tipo de conta
             </p>
           </div>
         </div>
@@ -134,7 +138,7 @@ export default async function ProfilePage({
               </h2>
 
               <p className="mt-1 text-sm font-medium text-white/35">
-                Essas informações serão usadas dentro das salas.
+                Essas informações serão usadas dentro das aulas. O tipo de conta não pode ser alterado por aqui.
               </p>
             </div>
 

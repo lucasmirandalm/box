@@ -1,618 +1,89 @@
-# 🎨 Box
+# Box — Ensino de desenho digital
 
-<p align="center">
-  Uma aplicação web colaborativa para desenhar, criar e compartilhar ideias em tempo real.
-</p>
+Ambiente web colaborativo para apoiar a interação entre professores e alunos durante atividades de desenho digital. O Box é o artefato computacional de uma pesquisa aplicada em Sistemas de Informação, com foco em sistemas colaborativos, IHC e informática na educação.
 
-<p align="center">
-  <strong>Next.js • TypeScript • Tailwind CSS • Supabase • Canvas API</strong>
-</p>
+**Proposta acadêmica:** Desenvolvimento e avaliação de um sistema web de desenho colaborativo em tempo real para apoio ao ensino de desenho digital.
 
----
+## Funcionalidades desta versão
 
-## ✨ Sobre o projeto
+- Cadastro e login com Supabase Auth. O usuário escolhe Professor (`teacher`) ou Aluno (`student`).
+- Contas antigas definem seu papel uma única vez após entrar, sem precisar criar outra conta.
+- Página inicial e ações de acordo com o papel. Somente professores criam aulas; ambos os perfis podem participar por código.
+- A aula possui tema, código de seis caracteres e limite original de cinco participantes no total.
+- Identificação do professor responsável e dos papéis dos participantes no editor; o responsável possui botão para copiar o código da aula.
+- Quadro compartilhado em tempo real, pincel, borracha, roda de cores, camadas, zoom, pan, desfazer e exportação PNG, preservados do código anterior.
+- O professor pode demonstrar técnicas e orientar visualmente os alunos desenhando no quadro compartilhado. Ainda não há camadas de feedback exclusivas, quadro individual por aluno, gestão de atividades ou encerramento forçado da aula.
 
-**Box** é uma aplicação web de desenho colaborativo desenvolvida como projeto de TCC.
+## Tecnologias
 
-A proposta é permitir que usuários criem salas privadas, convidem outras pessoas e desenhem juntos em um mesmo canvas em tempo real.
+Next.js, React, TypeScript, Tailwind CSS, Lucide, HTML Canvas API, Supabase Auth, PostgreSQL e Supabase Realtime. Identidade visual dark theme, `#ff1152` e M PLUS Rounded 1c.
 
-O editor é inspirado em softwares de desenho como o **Krita**, mas com uma interface simplificada e focada em colaboração.
+## Atualização do projeto existente (obrigatória)
 
-No MVP, cada sala terá suporte para até **5 participantes simultâneos**.
+Esta entrega é uma atualização do projeto BOX que já usa o Supabase. O ZIP original não contém o SQL completo do banco. A migração incluída pressupõe as tabelas `public.rooms` (id, code, owner_id, name, max_participants) e `public.room_members` (room_id, user_id), as funções RPC existentes e as políticas Realtime originais. Não é um instalador de banco do zero.
 
----
-
-## 🖼️ Preview
-
-![Preview do Box](./public/images/demo-cover.webp)
-
-A identidade visual do Box utiliza:
-
-- Tema dark
-- Cor principal `#ff1152`
-- Fonte **M PLUS Rounded 1c**
-- Interface arredondada e minimalista
-- Editor inspirado em aplicações profissionais de desenho
-
----
-
-## 🚀 Funcionalidades
-
-### ✅ Implementado
-
-#### Autenticação
-
-- Criação de conta
-- Login com e-mail e senha
-- Sessão persistente
-- Logout
-- Proteção de páginas privadas
-- Integração com Supabase Auth
-
-#### Perfil
-
-- Nome do usuário
-- E-mail
-- Alteração de senha
-- Pronome
-- Avatar com inicial do nome
-- Estrutura preparada para foto de perfil
-
-#### Landing page
-
-- Interface responsiva
-- Tema dark
-- Estado diferente para usuários autenticados e não autenticados
-- Menu de perfil
-- Links para criação e entrada em salas
-- Vídeo demonstrativo
-
-#### Editor
-
-- Canvas real com HTML Canvas API
-- Brush
-- Alteração do tamanho do brush
-- Seleção de cor
-- Borracha
-- Alteração do tamanho da borracha
-- Zoom com scroll do mouse
-- Limites de zoom
-- Interface inspirada em softwares como Krita
-
----
-
-## 🛠️ Em desenvolvimento
-
-- Criação real de salas
-- Código único para cada sala
-- Entrada em salas por código
-- Limite de 5 participantes
-- Sincronização de desenhos em tempo real
-- Cursores dos participantes
-- Lista de usuários conectados
-- Convites por link
-- Persistência dos desenhos
-- Histórico de alterações
-- Undo / Redo
-- Ferramenta de mover canvas
-- Camadas
-- Upload de avatar
-- Recuperação de senha
-- Melhorias para dispositivos com caneta e tablet gráfico
-
----
-
-## 🧠 Objetivo acadêmico
-
-O Box busca explorar conceitos relacionados a aplicações web colaborativas em tempo real, incluindo:
-
-- Comunicação bidirecional
-- Sincronização de estado
-- Concorrência entre usuários
-- Eventos em tempo real
-- Autenticação
-- Persistência de dados
-- Arquitetura cliente-servidor
-- Experiência de usuário em aplicações colaborativas
-
-Além da implementação da aplicação, o projeto poderá avaliar aspectos como:
-
-- Latência na sincronização entre clientes
-- Quantidade de eventos transmitidos
-- Desempenho com múltiplos participantes
-- Consistência do estado do canvas
-- Comportamento da aplicação sob diferentes cargas
-
----
-
-## 🧱 Tecnologias
-
-### Frontend
-
-- [Next.js](https://nextjs.org/)
-- [React](https://react.dev/)
-- [TypeScript](https://www.typescriptlang.org/)
-- [Tailwind CSS](https://tailwindcss.com/)
-- [Lucide](https://lucide.dev/)
-- HTML Canvas API
-
-### Backend
-
-O próprio **Next.js** é utilizado para a lógica server-side da aplicação.
-
-Atualmente utilizamos:
-
-- Server Components
-- Server Actions
-- Route Handlers
-- Cookies de sessão
-
-### Autenticação e banco
-
-- [Supabase](https://supabase.com/)
-- Supabase Auth
-- PostgreSQL
-
-### Futuro tempo real
-
-A camada colaborativa será implementada com comunicação em tempo real, provavelmente utilizando:
-
-- WebSocket
-- Socket.IO
-
----
-
-## 🏗️ Arquitetura planejada
-
-```text
-                         BOX
-                          │
-                      Next.js
-              ┌───────────┴───────────┐
-              │                       │
-          Interface                Backend
-              │                       │
-       React + Canvas          Server Actions
-              │                       │
-              ├───────────┬───────────┤
-              │           │           │
-          Supabase     PostgreSQL   WebSocket
-              │                       │
-      autenticação                 desenho
-      usuários                     cursores
-      perfis                       presença
-      sessões                      eventos
-      salas                        tempo real
-```
-
----
-
-## 📁 Estrutura do projeto
-
-A estrutura poderá mudar durante o desenvolvimento.
-
-```text
-box/
-├── public/
-│   ├── images/
-│   └── videos/
-│
-├── src/
-│   ├── app/
-│   │   ├── criar-conta/
-│   │   ├── criar-sala/
-│   │   ├── entrar/
-│   │   ├── entrar-na-sala/
-│   │   ├── perfil/
-│   │   ├── sala/
-│   │   │   └── [roomCode]/
-│   │   ├── globals.css
-│   │   ├── layout.tsx
-│   │   └── page.tsx
-│   │
-│   ├── components/
-│   │   └── room/
-│   │       └── room-editor.tsx
-│   │
-│   └── lib/
-│       ├── auth/
-│       │   └── actions.ts
-│       ├── profile/
-│       │   └── actions.ts
-│       └── supabase/
-│           ├── client.ts
-│           └── server.ts
-│
-├── .env.local
-├── package.json
-├── pnpm-lock.yaml
-└── README.md
-```
-
----
-
-## ⚙️ Como executar o projeto
-
-### Pré-requisitos
-
-Antes de começar, você precisa ter instalado:
-
-- Node.js
-- pnpm
-- Git
-
-Confira as versões:
-
-```bash
-node --version
-pnpm --version
-git --version
-```
-
----
-
-### 1. Clone o repositório
-
-```bash
-git clone git@github.com:SEU_USUARIO/box.git
-```
-
-Entre na pasta:
-
-```bash
-cd box
-```
-
----
-
-### 2. Instale as dependências
+1. Faça backup do código e do banco. Se possível, use um ambiente de teste e aguarde as aulas antigas expirarem antes de migrar.
+2. No Supabase Dashboard, abra **SQL Editor > New query**. Cole e execute todo o arquivo `supabase/migrations/202611180001_education_roles.sql`. A migração é transacional; se houver erro, não publique o novo código antes de corrigir o problema. Não remova as tabelas nem as funções antigas.
+3. Copie o conteúdo deste projeto para a pasta do BOX (preserve seu `.env.local` e `.git`). O ZIP não inclui segredos.
+4. Instale as dependências e inicie:
 
 ```bash
 pnpm install
-```
-
----
-
-### 3. Configure o Supabase
-
-Crie um projeto em:
-
-https://supabase.com/
-
-Depois crie o arquivo:
-
-```text
-.env.local
-```
-
-na raiz do projeto.
-
-Adicione:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=SUA_PROJECT_URL
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=SUA_PUBLISHABLE_KEY
-```
-
-Nunca envie chaves privadas ou `service_role` para o GitHub.
-
----
-
-### 4. Execute o projeto
-
-```bash
+pnpm test:education
 pnpm dev
 ```
 
-Abra:
+O `.env.local` existente deve conter:
 
-```text
-http://localhost:3000
+```dotenv
+NEXT_PUBLIC_SUPABASE_URL=https://SEU-PROJETO.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=SUA_CHAVE_PUBLICAVEL
 ```
 
----
+Para verificar a compilação completa antes de publicar:
 
-## 🔐 Autenticação
-
-O Box utiliza **Supabase Auth**.
-
-O fluxo atual é:
-
-```text
-Criar conta
-      ↓
-Supabase Auth
-      ↓
-Sessão
-      ↓
-Landing page autenticada
-      ↓
-Criar sala / Entrar em uma sala
+```bash
+pnpm exec tsc --noEmit
+pnpm build
 ```
 
-As páginas privadas verificam a sessão antes de permitir o acesso.
+## Permissões e decisões de implementação
 
----
+A tabela `box_account_roles` é a fonte de autorização. O papel escolhido no cadastro é gravado por um trigger de inserção em `auth.users`; mudanças posteriores em `user_metadata` não alteram a autorização. O usuário autenticado pode consultar apenas seu próprio papel diretamente e não pode gravá-lo ou alterá-lo. A RPC `box_choose_account_role` permite uma única escolha para contas antigas sem papel. A RPC `box_classroom_roles` permite que membros de uma aula consultem os papéis dos demais membros. O servidor verifica a associação à aula e as permissões antes de renderizar o editor.
 
-## 🎨 Editor
+A criação é verificada em três pontos: página `/criar-sala`, Server Action `createRoom` e trigger `box_guard_room_owner` na tabela `rooms`. O trigger exige que o proprietário seja o usuário autenticado e que tenha papel de professor, inclusive quando a inserção ocorre pela RPC `create_room` existente. Alterações do proprietário também são bloqueadas. O trigger não modifica a lógica de código, limite, sessões ou expiração. Ele impede inserções administrativas sem um usuário autenticado; se for necessário criar salas por processos administrativos, revise esse fluxo com cuidado.
 
-O editor atualmente possui duas ferramentas principais.
+A escolha Professor/Aluno é autodeclarada, conforme a proposta do protótipo. Não existe verificação de vínculo institucional. Um aluno não pode promover sua conta existente, mas pode criar uma nova conta e escolher Professor. Para uma implantação institucional, considere validação de professores ou aprovação administrativa.
 
-### Brush
+O botão de copiar código aparece apenas para o professor responsável. Isso é uma conveniência de interface, não uma restrição de compartilhamento: quem entra por código já conhece esse código. O sistema mantém a colaboração original; os rótulos dos participantes não são utilizados para autorizar eventos Realtime. Uma política de edição exclusiva por professor exigirá validação adicional dos eventos e das camadas.
 
-Permite:
+### Contas existentes
 
-- Desenhar no canvas
-- Alterar a cor
-- Alterar o tamanho
+Após o login, a conta antiga é direcionada para `/definir-perfil`. Escolha Professor ou Aluno. Depois disso, o papel não pode ser modificado pelo formulário de perfil. As contas antigas não são apagadas. Aulas antigas não são removidas pela migração e seguem as regras de expiração já existentes.
 
-### Borracha
+Se um administrador precisar corrigir uma escolha feita por engano, pode executar no SQL Editor, substituindo o e-mail e o papel pelos valores corretos:
 
-Permite:
-
-- Apagar partes do desenho
-- Alterar o tamanho da borracha
-
-A borracha utiliza:
-
-```text
-globalCompositeOperation = destination-out
+```sql
+update public.box_account_roles
+set role = 'teacher'
+where user_id = (select id from auth.users where email = 'professor@exemplo.com');
 ```
 
-para remover realmente os pixels desenhados.
+Esse comando é administrativo, não deve ser exposto no cliente. Use `'student'` para reverter o papel, e recarregue a aplicação após a alteração.
 
----
+## Testes de integração recomendados
 
-## 🔎 Zoom
+Os testes unitários em `scripts/test-education.cjs` usam mocks para verificar as Server Actions. Eles não substituem os testes com Supabase real.
 
-O zoom é controlado pela roda do mouse.
+1. Crie duas contas de teste, uma Professor e uma Aluno, e confirme os e-mails conforme sua configuração de Auth.
+2. Entre como Professor, crie uma aula com tema e copie o código.
+3. Entre como Aluno em outro navegador/perfil. Confirme que não há botão Criar aula e que `/criar-sala` redireciona com aviso.
+4. Confirme que a RPC `create_room` chamada diretamente com a sessão do aluno é rejeitada pelo banco (`TEACHER_ONLY` ou erro equivalente), sem criar uma sala. Confirme também que a RPC `box_choose_account_role` rejeita uma segunda escolha.
+5. Entre na aula pelo código. Confira o tema, a identificação dos participantes, a sincronização de traços e o limite de cinco participantes.
+6. Teste roda de cores, camadas, desfazer, zoom, toque e exportação PNG. Confira a expiração da sala após a saída dos participantes.
+7. Entre com uma conta antiga sem papel. Confirme a tela de escolha única e que o login seguinte não solicita novamente.
+8. Teste o acesso a uma aula sem ser membro. A RPC `box_classroom_roles` deve rejeitar a consulta.
 
-```text
-Scroll para cima
-        ↓
-Aumenta o zoom
+## Próximas etapas acadêmicas
 
-Scroll para baixo
-        ↓
-Diminui o zoom
-```
-
-Limites atuais:
-
-```text
-25% → 300%
-```
-
-O cálculo das coordenadas do ponteiro considera o tamanho visual do canvas após a aplicação do zoom.
-
----
-
-## 👥 Salas
-
-O MVP será limitado a:
-
-```text
-5 participantes por sala
-```
-
-O fluxo planejado é:
-
-```text
-Usuário autenticado
-        ↓
-Criar sala
-        ↓
-Código gerado
-        ↓
-/sala/ABC123
-        ↓
-Compartilhar código ou link
-        ↓
-Outros participantes entram
-```
-
----
-
-## 🌐 Colaboração em tempo real
-
-A arquitetura planejada para o multiplayer é:
-
-```text
-Usuário desenha
-      ↓
-Canvas
-      ↓
-evento de desenho
-      ↓
-WebSocket / Socket.IO
-      ↓
-Servidor
-      ↓
-Outros participantes
-      ↓
-Canvas atualizado
-```
-
-Eventos temporários, como movimentos do pincel e cursores, não devem ser armazenados diretamente no PostgreSQL a cada movimento.
-
----
-
-## 🗄️ Persistência
-
-O PostgreSQL será utilizado para informações persistentes, como:
-
-```text
-users
-rooms
-room_members
-drawings
-```
-
-Exemplo planejado:
-
-```text
-rooms
-
-id
-name
-code
-owner_id
-created_at
-```
-
-E:
-
-```text
-room_members
-
-room_id
-user_id
-joined_at
-```
-
----
-
-## 🗺️ Roadmap
-
-### Etapa 1 — Base do projeto
-
-- [x] Next.js
-- [x] TypeScript
-- [x] Tailwind CSS
-- [x] Identidade visual
-- [x] Landing page
-
-### Etapa 2 — Usuários
-
-- [x] Cadastro
-- [x] Login
-- [x] Logout
-- [x] Sessão
-- [x] Perfil
-- [x] Pronome
-- [ ] Upload de avatar
-- [ ] Recuperação de senha
-
-### Etapa 3 — Editor
-
-- [x] Canvas
-- [x] Brush
-- [x] Cor
-- [x] Tamanho do brush
-- [x] Borracha
-- [x] Tamanho da borracha
-- [x] Zoom
-- [ ] Pan
-- [ ] Undo
-- [ ] Redo
-- [ ] Rotação
-- [ ] Camadas
-- [ ] Novos brushes
-
-### Etapa 4 — Salas
-
-- [ ] Criar sala
-- [ ] Gerar código
-- [ ] Entrar por código
-- [ ] Limite de participantes
-- [ ] Dono da sala
-- [ ] Convite por link
-
-### Etapa 5 — Multiplayer
-
-- [ ] WebSocket
-- [ ] Socket.IO
-- [ ] Desenho sincronizado
-- [ ] Cursores em tempo real
-- [ ] Entrada e saída de participantes
-- [ ] Reconexão
-
-### Etapa 6 — Persistência
-
-- [ ] Salvar desenho
-- [ ] Restaurar desenho
-- [ ] Histórico
-- [ ] Banco de salas
-- [ ] Participantes
-
-### Etapa 7 — TCC
-
-- [ ] Testes de carga
-- [ ] Testes de latência
-- [ ] Avaliação de desempenho
-- [ ] Diagramas
-- [ ] Documentação
-- [ ] Deploy
-- [ ] Apresentação
-
----
-
-## 🎯 MVP
-
-O MVP do Box será considerado completo quando for possível:
-
-1. Criar uma conta.
-2. Fazer login.
-3. Criar uma sala.
-4. Compartilhar o código da sala.
-5. Entrar em uma sala existente.
-6. Ter até 5 participantes simultaneamente.
-7. Desenhar no mesmo canvas em tempo real.
-8. Utilizar brush e borracha.
-9. Alterar cor e tamanho do brush.
-10. Visualizar os participantes conectados.
-
----
-
-## 🧪 Testes planejados
-
-O projeto poderá ser testado com diferentes quantidades de clientes simultâneos:
-
-```text
-1 usuário
-5 usuários
-10 usuários
-20 usuários
-50 usuários
-```
-
-Mesmo que o MVP limite uma sala a 5 pessoas, quantidades maiores poderão ser utilizadas para testes experimentais de carga.
-
-Métricas de interesse:
-
-- Latência
-- Eventos por segundo
-- Consumo de memória
-- Utilização de CPU
-- Uso de rede
-- Consistência entre clientes
-
----
-
-## 📌 Status
-
-> 🚧 Projeto em desenvolvimento.
-
-O Box ainda está em fase de implementação e diversas funcionalidades descritas neste README fazem parte do roadmap.
-
----
-
-## 🎓 Contexto
-
-Este projeto está sendo desenvolvido como **Trabalho de Conclusão de Curso (TCC)** e também como projeto de portfólio.
-
-O foco técnico principal é estudar e implementar uma aplicação web colaborativa de desenho em tempo real.
-
----
-
-## 📄 Licença
-
-A licença do projeto ainda será definida.
-
----
-
-<p align="center">
-  <strong>Box</strong>
-  <br />
-  Uma tela. Muitas ideias. Juntos.
-</p>
+Levantamento de requisitos com professores e estudantes; camada de correção docente sem alterar o desenho original; modo demonstração; persistência de atividades; avaliação de usabilidade, latência e clareza do feedback visual. A pesquisa deverá distinguir resultados técnicos e utilidade percebida de evidências de melhora na aprendizagem.

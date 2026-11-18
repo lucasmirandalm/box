@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { register } from "@/lib/auth/actions";
+import RoleSelector from "@/components/account/role-selector";
 
 type RegisterPageProps = {
   searchParams: Promise<{
@@ -29,7 +30,7 @@ export default async function RegisterPage({
         </span>
       </Link>
 
-      <div className="relative z-10 w-full max-w-md">
+      <div className="relative z-10 w-full max-w-lg">
         <div className="mb-10 text-center">
           <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#ff1152]/10 text-2xl font-black text-[#ff1152]">
             +
@@ -40,7 +41,7 @@ export default async function RegisterPage({
           </h1>
 
           <p className="mt-3 font-medium leading-6 text-white/40">
-            Entre no Box e comece a criar junto com seus amigos.
+            Ensine ou aprenda desenho em um ambiente colaborativo.
           </p>
         </div>
 
@@ -52,6 +53,7 @@ export default async function RegisterPage({
           )}
 
           <form action={register} className="space-y-6">
+            <RoleSelector />
             <div>
               <label
                 htmlFor="name"

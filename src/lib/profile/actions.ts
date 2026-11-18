@@ -26,7 +26,6 @@ export async function updateProfile(formData: FormData) {
 
   const { error } = await supabase.auth.updateUser({
     data: {
-      ...user.user_metadata,
       name,
       pronouns,
     },

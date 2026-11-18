@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { isAccountRole } from "@/lib/account/roles";
+import { getAccountRole } from "@/lib/account/server";
 
 export async function login(formData: FormData) {
   const email = String(formData.get("email") ?? "").trim();
@@ -36,6 +38,11 @@ export async function register(formData: FormData) {
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const confirmPassword = String(formData.get("confirmPassword") ?? "");
+  const role = formData.get("role");
+
+  if (!isAccountRole(role)) {
+    redirect(`/criar-conta?error=${encodeURIComponent("Selecione Professor ou Aluno.")}`);
+  }
 
   if (!name || !email || !password || !confirmPassword) {
     redirect(
@@ -69,12 +76,13 @@ export async function register(formData: FormData) {
     options: {
       data: {
         name,
+        box_role: role,
       },
     },
   });
 
   if (error) {
-  console.error("Supabase sign up error:", error);
+    console.error("Supabase sign up error:", error);
 
     redirect(
       `/criar-conta?error=${encodeURIComponent(error.message)}`,
@@ -87,6 +95,28 @@ export async function register(formData: FormData) {
         "Conta criada. Verifique seu e-mail para confirmar o cadastro.",
       )}`,
     );
+  }
+
+  revalidatePath("/", "layout");
+  redirect("/");
+}
+
+export async function chooseAccountRole(formData: FormData) {
+  const role = formData.get("role");
+  if (!isAccountRole(role)) {
+    redirect(`/definir-perfil?error=${encodeURIComponent("Selecione um tipo de conta.")}`);
+  }
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/entrar");
+  if (await getAccountRole(supabase, user.id)) redirect("/");
+
+  const { error } = await supabase.rpc("box_choose_account_role", { p_role: role });
+  if (error) {
+    if (error.message.includes("ACCOUNT_ROLE_ALREADY_DEFINED")) redirect("/");
+    console.error("Account role selection failed:", error);
+    redirect(`/definir-perfil?error=${encodeURIComponent("Não foi possível definir o perfil. Tente novamente.")}`);
   }
 
   revalidatePath("/", "layout");

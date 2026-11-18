@@ -10,8 +10,8 @@ const mPlusRounded = M_PLUS_Rounded_1c({
 });
 
 export const metadata: Metadata = {
-  title: "Box",
-  description: "Desenhe e crie junto com outras pessoas em tempo real.",
+  title: "Box — Ensino de desenho",
+  description: "Ambiente colaborativo de apoio ao ensino e à aprendizagem de desenho digital.",
 };
 
 export default function RootLayout({

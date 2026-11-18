@@ -2,22 +2,27 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountRole } from "@/lib/account/server";
 
 function getRoomErrorMessage(message: string) {
+  if (message.includes("TEACHER_ONLY") || message.includes("ROOM_OWNER_MISMATCH")) {
+    return "Somente professores podem criar aulas.";
+  }
+
   if (message.includes("ROOM_NOT_FOUND")) {
-    return "Sala não encontrada.";
+    return "Aula não encontrada.";
   }
 
   if (message.includes("ROOM_FULL")) {
-    return "Essa sala já está cheia.";
+    return "Essa aula já está cheia.";
   }
 
   if (message.includes("INVALID_ROOM_CODE")) {
-    return "Código da sala inválido.";
+    return "Código da aula inválido.";
   }
 
   if (message.includes("INVALID_ROOM_NAME")) {
-    return "Nome da sala inválido.";
+    return "Nome da aula inválido.";
   }
 
   if (message.includes("NOT_AUTHENTICATED")) {
@@ -25,7 +30,7 @@ function getRoomErrorMessage(message: string) {
   }
 
   if (message.includes("COULD_NOT_GENERATE_ROOM_CODE")) {
-    return "Não foi possível gerar o código da sala.";
+    return "Não foi possível gerar o código da aula.";
   }
 
   return "Ocorreu um erro. Tente novamente.";
@@ -42,6 +47,11 @@ export async function createRoom(formData: FormData) {
     redirect("/entrar");
   }
 
+  const role = await requireAccountRole(supabase, user.id);
+  if (role !== "teacher") {
+    redirect(`/entrar-na-sala?error=${encodeURIComponent("Somente professores podem criar aulas.")}`);
+  }
+
   const name = String(
     formData.get("name") ?? "",
   ).trim();
@@ -49,7 +59,7 @@ export async function createRoom(formData: FormData) {
   if (!name) {
     redirect(
       `/criar-sala?error=${encodeURIComponent(
-        "Digite um nome para a sala.",
+        "Digite um nome para a aula.",
       )}`,
     );
   }
@@ -57,7 +67,7 @@ export async function createRoom(formData: FormData) {
   if (name.length > 60) {
     redirect(
       `/criar-sala?error=${encodeURIComponent(
-        "O nome da sala pode ter no máximo 60 caracteres.",
+        "O nome da aula pode ter no máximo 60 caracteres.",
       )}`,
     );
   }
@@ -96,6 +106,8 @@ export async function joinRoom(formData: FormData) {
   if (!user) {
     redirect("/entrar");
   }
+
+  await requireAccountRole(supabase, user.id);
 
   const code = String(
     formData.get("code") ?? "",

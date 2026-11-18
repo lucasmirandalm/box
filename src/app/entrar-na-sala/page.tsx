@@ -7,6 +7,8 @@ import {
 
 import { createClient } from "@/lib/supabase/server";
 import { joinRoom } from "@/lib/rooms/actions";
+import { requireAccountRole } from "@/lib/account/server";
+import { accountRoleLabel } from "@/lib/account/roles";
 
 type JoinRoomPageProps = {
   searchParams: Promise<{
@@ -28,6 +30,8 @@ export default async function JoinRoomPage({
   if (!user) {
     redirect("/entrar");
   }
+
+  const role = await requireAccountRole(supabase, user.id);
 
   const userName =
     user.user_metadata?.name ??
@@ -60,12 +64,11 @@ export default async function JoinRoomPage({
             </div>
 
             <h1 className="text-3xl font-black">
-              Entrar em uma sala
+              Entrar em uma aula
             </h1>
 
             <p className="mt-2 text-sm font-medium leading-6 text-white/40">
-              Digite o código enviado pelo criador
-              da sala.
+              Digite o código compartilhado pelo professor responsável.
             </p>
           </div>
 
@@ -84,7 +87,7 @@ export default async function JoinRoomPage({
 
             <div>
               <p className="text-xs font-medium text-white/30">
-                Entrando como
+                Participando como {accountRoleLabel(role)}
               </p>
 
               <p className="text-sm font-bold">
@@ -108,7 +111,7 @@ export default async function JoinRoomPage({
                 htmlFor="code"
                 className="mb-2 block text-sm font-bold text-white/70"
               >
-                Código da sala
+                Código da aula
               </label>
 
               <input
@@ -129,7 +132,7 @@ export default async function JoinRoomPage({
               type="submit"
               className="flex h-12 w-full items-center justify-center rounded-xl bg-[#ff1152] text-sm font-black transition hover:bg-[#ff2e65] active:scale-[0.99]"
             >
-              Entrar na sala
+              Participar da aula
             </button>
           </form>
         </div>

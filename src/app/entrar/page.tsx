@@ -41,7 +41,7 @@ export default async function LoginPage({
           </h1>
 
           <p className="mt-3 font-medium leading-6 text-white/40">
-            Entre na sua conta para continuar desenhando com seus amigos.
+            Entre na sua conta para participar de aulas e praticar desenho.
           </p>
         </div>
 
